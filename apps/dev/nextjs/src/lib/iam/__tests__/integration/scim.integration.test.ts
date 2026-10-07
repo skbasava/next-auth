@@ -23,7 +23,7 @@ const orgId = randomUUID(),
   scimId = randomUUID(),
   foreignScimId = randomUUID(),
   tag = randomUUID()
-const createdIds = Array.from({ length: 5 }, () => randomUUID())
+const createdIds = Array.from({ length: 12 }, () => randomUUID())
 const catalogIds = Array.from({ length: 4 }, () => randomUUID())
 const scopes = ["scim:read", "scim:create", "scim:update", "scim:delete"]
 const key: KeyIdentity = { keyId, orgId, purpose: "scim", permissions: scopes }
@@ -372,4 +372,169 @@ it("SCIM add merges complex names and appends pathless multi-valued emails", asy
   )
   expect(result.name).toEqual({ givenName: "A", familyName: "C" })
   expect(result.emails).toHaveLength(3)
+})
+it("userName equality is case-insensitive while externalId remains case-exact", async () => {
+  allocation.queue.push(createdIds[5])
+  const u = await svc.createScimUser(
+    key,
+    { userName: "MiXeD", externalId: "CaSe" },
+    meta
+  )
+  expect(
+    (
+      await svc.listScimUsers(key, { filter: 'userName eq "mixed"' })
+    ).Resources.map((r) => r.id)
+  ).toEqual([u.id])
+  expect(
+    (await svc.listScimUsers(key, { filter: 'externalId eq "case"' }))
+      .totalResults
+  ).toBe(0)
+  allocation.queue.push(createdIds[6])
+  await expect(
+    svc.createScimUser(key, { userName: "MIXED" }, meta)
+  ).rejects.toMatchObject({ status: 409 })
+})
+it("PATCH rejects an invalid first operation even when a later operation corrects it", async () => {
+  allocation.queue.push(createdIds[7])
+  const u = await svc.createScimUser(
+    key,
+    { userName: "sequence", displayName: "Original" },
+    meta
+  )
+  const revision = (
+    await db.organization.findUniqueOrThrow({ where: { id: orgId } })
+  ).authorizationRevision
+  const auditCount = await db.auditLog.count({
+    where: { orgId, requestId: tag },
+  })
+  for (const Operations of [
+    [
+      { op: "replace" as const, path: "active" as const, value: "false" },
+      { op: "replace" as const, path: "active" as const, value: true },
+    ],
+    [
+      {
+        op: "replace" as const,
+        path: "name" as const,
+        value: { unsupported: "bad" },
+      },
+      {
+        op: "replace" as const,
+        path: "name" as const,
+        value: { givenName: "Good" },
+      },
+    ],
+  ])
+    await expect(
+      svc.patchScimUser(
+        key,
+        u.id,
+        { schemas: [svc.SCIM_PATCH_SCHEMA], Operations },
+        meta
+      )
+    ).rejects.toMatchObject({ status: 400 })
+  expect((await svc.getScimUser(key, u.id)).name).toBeUndefined()
+  expect(
+    (await db.organization.findUniqueOrThrow({ where: { id: orgId } }))
+      .authorizationRevision
+  ).toBe(revision)
+  expect(await db.auditLog.count({ where: { orgId, requestId: tag } })).toBe(
+    auditCount
+  )
+})
+it("PATCH adding a primary email clears previous primary for explicit and pathless adds", async () => {
+  allocation.queue.push(createdIds[8])
+  const u = await svc.createScimUser(
+    key,
+    {
+      userName: "primary",
+      emails: [{ value: "first@example.test", primary: true }],
+    },
+    meta
+  )
+  const explicit = await svc.patchScimUser(
+    key,
+    u.id,
+    {
+      schemas: [svc.SCIM_PATCH_SCHEMA],
+      Operations: [
+        {
+          op: "add",
+          path: "emails",
+          value: [{ value: "second@example.test", primary: true }],
+        },
+      ],
+    },
+    meta
+  )
+  expect(explicit.emails?.map((e) => e.primary)).toEqual([false, true])
+  const pathless = await svc.patchScimUser(
+    key,
+    u.id,
+    {
+      schemas: [svc.SCIM_PATCH_SCHEMA],
+      Operations: [
+        {
+          op: "add",
+          value: { emails: [{ value: "third@example.test", primary: true }] },
+        },
+      ],
+    },
+    meta
+  )
+  expect(pathless.emails?.map((e) => e.primary)).toEqual([false, false, true])
+})
+it("removing a missing optional path returns noTarget and rolls back prior operations", async () => {
+  allocation.queue.push(createdIds[9])
+  const u = await svc.createScimUser(
+    key,
+    { userName: "missing", displayName: "Original" },
+    meta
+  )
+  const rev = (
+    await db.organization.findUniqueOrThrow({ where: { id: orgId } })
+  ).authorizationRevision
+  for (const path of ["name.givenName", "externalId"] as const)
+    await expect(
+      svc.patchScimUser(
+        key,
+        u.id,
+        {
+          schemas: [svc.SCIM_PATCH_SCHEMA],
+          Operations: [
+            { op: "replace", path: "displayName", value: "Changed" },
+            { op: "remove", path },
+          ],
+        },
+        meta
+      )
+    ).rejects.toMatchObject({ status: 400, scimType: "noTarget" })
+  expect((await svc.getScimUser(key, u.id)).displayName).toBe("Original")
+  expect(
+    (await db.organization.findUniqueOrThrow({ where: { id: orgId } }))
+      .authorizationRevision
+  ).toBe(rev)
+})
+it("concurrent username case variants yield one identity and SQL enforces tenant case uniqueness", async () => {
+  allocation.queue.push(createdIds[10], createdIds[11])
+  const results = await Promise.allSettled([
+    svc.createScimUser(key, { userName: "RaceCase" }, meta),
+    svc.createScimUser(key, { userName: "rAcEcAsE" }, meta),
+  ])
+  expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1)
+  expect(results.find((r) => r.status === "rejected")).toMatchObject({
+    reason: { status: 409, scimType: "uniqueness" },
+  })
+  const found = await svc.listScimUsers(key, {
+    filter: 'userName eq "RACECASE"',
+  })
+  expect(found.totalResults).toBe(1)
+  const row = await db.scimIdentity.findUniqueOrThrow({
+    where: { orgId_id: { orgId, id: found.Resources[0].id } },
+  })
+  await expect(
+    db.scimIdentity.create({
+      data: { orgId, userId: shared, userName: row.userName.toUpperCase() },
+    })
+  ).rejects.toMatchObject({ code: "P2002" })
 })

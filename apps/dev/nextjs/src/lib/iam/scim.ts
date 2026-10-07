@@ -307,8 +307,17 @@ export async function listScimUsers(
   input: ScimListInput
 ): Promise<ScimListDto> {
   return withKey(key, "read", async (tx, orgId) => {
-    const p = parse(scimListSchema, input),
-      where = { orgId, ...parseScimFilter(p.filter) }
+    const p = parse(scimListSchema, input)
+    const filter = parseScimFilter(p.filter)
+    const where: Prisma.ScimIdentityWhereInput = { orgId, ...filter }
+    if (filter.userName !== undefined) {
+      // Exact lower-case equality, not ILIKE: literal %/_ remain literal.
+      const matches = await tx.$queryRaw<
+        { id: string }[]
+      >`SELECT "id" FROM "ScimIdentity" WHERE "orgId" = ${orgId} AND lower("userName") = lower(${filter.userName}) LIMIT 1`
+      delete where.userName
+      where.id = { in: matches.map((row) => row.id) }
+    }
     const totalResults = await tx.scimIdentity.count({ where })
     const rows = p.count
       ? await tx.scimIdentity.findMany({
@@ -401,6 +410,21 @@ export async function replaceScimUser(
     save(tx, orgId, await target(tx, orgId, id), input, meta, "replaced")
   )
 }
+type ScimEmail = NonNullable<z.infer<typeof profileSchema>["emails"]>[number]
+function addEmails(existing: unknown, incoming: unknown): ScimEmail[] {
+  const additions =
+    parse(
+      profileSchema.shape.emails,
+      Array.isArray(incoming) ? incoming : [incoming]
+    ) ?? []
+  const previous = (existing as ScimEmail[] | undefined) ?? []
+  return [
+    ...(additions.some((e) => e.primary)
+      ? previous.map((e) => ({ ...e, primary: false }))
+      : previous),
+    ...additions,
+  ]
+}
 export async function patchScimUser(
   key: KeyIdentity,
   id: string,
@@ -437,13 +461,9 @@ export async function patchScimUser(
               ...partial.name,
             }
           if (partial.emails)
-            partial.emails = [
-              ...((value.emails as z.infer<typeof profileSchema>["emails"]) ??
-                []),
-              ...partial.emails,
-            ]
+            partial.emails = addEmails(value.emails, partial.emails)
         }
-        value = { ...value, ...partial }
+        value = parse(scimUserSchema, { ...value, ...partial })
         continue
       }
       if (remove && (op.path === "userName" || op.path === "active"))
@@ -453,6 +473,8 @@ export async function patchScimUser(
       if (op.path.startsWith("name.")) {
         const field = op.path.slice(5)
         const name = { ...(value.name as Record<string, unknown> | undefined) }
+        if (remove && !Object.hasOwn(name, field))
+          throw new ScimError(400, "noTarget")
         if (remove) delete name[field]
         else name[field] = op.value
         value.name = name
@@ -462,13 +484,13 @@ export async function patchScimUser(
           ...(value.name as z.infer<typeof profileSchema>["name"]),
           ...name,
         }
-      } else if (remove) delete value[op.path]
-      else if (op.path === "emails" && op.op.toLowerCase() === "add")
-        value.emails = [
-          ...((value.emails as unknown[] | undefined) ?? []),
-          ...(Array.isArray(op.value) ? op.value : [op.value]),
-        ]
+      } else if (remove) {
+        if (!Object.hasOwn(value, op.path)) throw new ScimError(400, "noTarget")
+        delete value[op.path]
+      } else if (op.path === "emails" && op.op.toLowerCase() === "add")
+        value.emails = addEmails(value.emails, op.value)
       else value[op.path] = op.value
+      value = parse(scimUserSchema, value)
     }
     return save(tx, orgId, row, parse(scimUserSchema, value), meta, "patched")
   })
