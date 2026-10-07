@@ -1,6 +1,6 @@
 datasource db {
-  provider = "sqlite"
-  url      = "file:./dev.db"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 generator client {
@@ -34,14 +34,23 @@ model Session {
 }
 
 model User {
-  id            String    @id @default(cuid())
-  name          String?
-  email         String?   @unique
-  emailVerified DateTime?
-  image         String?
-  accounts      Account[]
-  sessions      Session[]
-  Authenticator Authenticator[]
+  id             String          @id @default(cuid())
+  name           String?
+  email          String?         @unique
+  emailVerified  DateTime?
+  image          String?
+  accounts       Account[]
+  sessions       Session[]
+  Authenticator  Authenticator[]
+  active         Boolean         @default(true)
+  passwordHash   String?
+  sessionVersion Int             @default(0)
+  // Protected bootstrap-only privilege; never writable by ordinary IAM APIs.
+  systemAdmin    Boolean         @default(false)
+  memberships    Membership[]
+  iamSessions    IamSession[]
+  mfaCredential  MfaCredential?
+  backupCodes    BackupCode[]
 }
 
 model VerificationToken {
@@ -64,4 +73,281 @@ model Authenticator {
   transports           String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Organization {
+  id                    String         @id @default(cuid())
+  slug                  String         @unique
+  name                  String
+  active                Boolean        @default(true)
+  authorizationRevision Int            @default(0)
+  requireMfa            Boolean        @default(false)
+  createdAt             DateTime       @default(now())
+  memberships           Membership[]
+  roles                 Role[]
+  appAccess             OrgAppAccess[]
+  invitations           Invitation[]
+  apiKeys               ApiKey[]
+  auditLogs             AuditLog[]
+}
+
+model Membership {
+  orgId        String
+  userId       String
+  active       Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  organization Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roles        UserRole[]
+  appRoles     UserAppRole[]
+  scimIdentity ScimIdentity?
+
+  @@id([orgId, userId])
+  @@index([userId, active])
+}
+
+model Role {
+  id               String           @default(cuid())
+  orgId            String
+  name             String
+  description      String?
+  organization     Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  permissions      RolePermission[]
+  users            UserRole[]
+  invitationGrants InvitationRole[]
+
+  @@id([orgId, id])
+  @@unique([orgId, name])
+}
+
+model Permission {
+  id          String              @id @default(cuid())
+  key         String              @unique
+  resource    String
+  action      String
+  appId       String?
+  application Application?        @relation(fields: [appId], references: [id], onDelete: Cascade)
+  coreRoles   RolePermission[]
+  appRoles    AppRolePermission[]
+
+  @@unique([appId, id])
+  @@unique([appId, resource, action])
+}
+
+model RolePermission {
+  orgId        String
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [orgId, roleId], references: [orgId, id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([orgId, roleId, permissionId])
+}
+
+model UserRole {
+  orgId      String
+  userId     String
+  roleId     String
+  membership Membership @relation(fields: [orgId, userId], references: [orgId, userId], onDelete: Cascade)
+  role       Role       @relation(fields: [orgId, roleId], references: [orgId, id], onDelete: Cascade)
+
+  @@id([orgId, userId, roleId])
+}
+
+model Application {
+  webhookUrl            String?
+  updatedAt             DateTime       @updatedAt
+  id                    String         @id @default(cuid())
+  slug                  String         @unique
+  name                  String
+  description           String?
+  active                Boolean        @default(true)
+  integrationSecretHash String
+  credentialExpiresAt   DateTime?
+  credentialRevokedAt   DateTime?
+  createdAt             DateTime       @default(now())
+  resources             AppResource[]
+  permissions           Permission[]
+  roles                 AppRole[]
+  organizations         OrgAppAccess[]
+}
+
+model AppResource {
+  actions     String[]
+  appId       String
+  name        String
+  description String?
+  application Application @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@id([appId, name])
+}
+
+model AppRole {
+  id          String              @default(cuid())
+  appId       String
+  name        String
+  description String?
+  application Application         @relation(fields: [appId], references: [id], onDelete: Cascade)
+  permissions AppRolePermission[]
+  users       UserAppRole[]
+
+  @@id([appId, id])
+  @@unique([appId, name])
+}
+
+model AppRolePermission {
+  appId        String
+  roleId       String
+  permissionId String
+  role         AppRole    @relation(fields: [appId, roleId], references: [appId, id], onDelete: Cascade)
+  permission   Permission @relation(fields: [appId, permissionId], references: [appId, id], onDelete: Cascade)
+
+  @@id([appId, roleId, permissionId])
+}
+
+model OrgAppAccess {
+  orgId        String
+  appId        String
+  active       Boolean       @default(true)
+  requireMfa   Boolean       @default(false)
+  organization Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  application  Application   @relation(fields: [appId], references: [id], onDelete: Cascade)
+  assignments  UserAppRole[]
+
+  @@id([orgId, appId])
+}
+
+model UserAppRole {
+  orgId      String
+  userId     String
+  appId      String
+  roleId     String
+  membership Membership   @relation(fields: [orgId, userId], references: [orgId, userId], onDelete: Cascade)
+  access     OrgAppAccess @relation(fields: [orgId, appId], references: [orgId, appId], onDelete: Cascade)
+  role       AppRole      @relation(fields: [appId, roleId], references: [appId, id], onDelete: Cascade)
+
+  @@id([orgId, userId, appId, roleId])
+}
+
+model Invitation {
+  id           String           @default(cuid())
+  orgId        String
+  email        String
+  tokenHash    String           @unique
+  expiresAt    DateTime
+  acceptedAt   DateTime?
+  revokedAt    DateTime?
+  createdAt    DateTime         @default(now())
+  organization Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  roles        InvitationRole[]
+
+  @@id([orgId, id])
+  @@index([orgId, email])
+}
+
+model InvitationRole {
+  orgId        String
+  invitationId String
+  roleId       String
+  invitation   Invitation @relation(fields: [orgId, invitationId], references: [orgId, id], onDelete: Cascade)
+  role         Role       @relation(fields: [orgId, roleId], references: [orgId, id], onDelete: Cascade)
+
+  @@id([orgId, invitationId, roleId])
+}
+
+enum ApiKeyPurpose {
+  IAM
+  SCIM
+}
+
+model ApiKey {
+  id              String        @id @default(cuid())
+  orgId           String
+  name            String
+  prefix          String        @unique
+  secretHash      String
+  purpose         ApiKeyPurpose
+  // Validated registered permission keys, bounded by actor scope at creation.
+  permissionKeys  String[]
+  createdByUserId String
+  createdAt       DateTime      @default(now())
+  expiresAt       DateTime
+  revokedAt       DateTime?
+  lastUsedAt      DateTime?
+  organization    Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, createdAt, id])
+}
+
+model IamSession {
+  id             String    @id @default(cuid())
+  userId         String
+  sessionVersion Int
+  createdAt      DateTime  @default(now())
+  expiresAt      DateTime
+  revokedAt      DateTime?
+  mfaVerifiedAt  DateTime?
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt, id])
+}
+
+model MfaCredential {
+  userId                  String    @id
+  // Versioned AEAD envelope includes nonce, authentication tag and key version.
+  encryptedSecret         String?
+  pendingEncryptedSecret  String?
+  pendingExpiresAt        DateTime?
+  enrolledAt              DateTime?
+  lastAcceptedStep        BigInt?
+  failedAttempts          Int       @default(0)
+  attemptWindowStartedAt  DateTime?
+  lockedUntil             DateTime?
+  pendingLastAcceptedStep BigInt?
+  user                    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model BackupCode {
+  id         String    @id @default(cuid())
+  userId     String
+  codeHash   String
+  createdAt  DateTime  @default(now())
+  consumedAt DateTime?
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, consumedAt])
+}
+
+model AuditLog {
+  id           String        @id @default(cuid())
+  orgId        String?
+  actorUserId  String?
+  action       String
+  targetType   String?
+  targetId     String?
+  requestId    String
+  ip           String?
+  userAgent    String?
+  // Service must supply only bounded allowlisted sanitized metadata.
+  metadata     Json
+  createdAt    DateTime      @default(now())
+  organization Organization? @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, createdAt, id])
+}
+
+model ScimIdentity {
+  orgId      String
+  userId     String
+  id         String     @default(cuid())
+  externalId String?
+  userName   String
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  membership Membership @relation(fields: [orgId, userId], references: [orgId, userId], onDelete: Cascade)
+
+  @@id([orgId, userId])
+  @@unique([orgId, id])
+  @@unique([orgId, externalId])
+  @@unique([orgId, userName])
 }
