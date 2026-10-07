@@ -7,6 +7,13 @@ vi.mock("../auth-session", () => ({
   },
 }))
 const inventory: Record<string, string[]> = {
+  apps: ["GET", "POST"],
+  "apps/[appId]": ["GET", "PATCH"],
+  "apps/[appId]/resources": ["POST"],
+  "apps/[appId]/roles": ["POST"],
+  "apps/[appId]/roles/[id]/permissions": ["PUT"],
+  "apps/[appId]/users/[uid]/roles": ["POST"],
+  "apps/[appId]/organizations/[orgId]": ["PUT"],
   users: ["GET", "POST"],
   "users/[id]": ["GET", "PATCH", "DELETE"],
   "users/[id]/roles": ["PUT"],

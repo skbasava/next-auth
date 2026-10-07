@@ -80,6 +80,25 @@ export const appRoleInputSchema = z
     permissionKeys: permissionKeysSchema.optional(),
   })
   .strict()
+export const appRolePermissionsSchema = z
+  .object({ permissionKeys: permissionKeysSchema })
+  .strict()
+export const appRoleAssignmentSchema = z
+  .object({
+    roleIds: z
+      .array(opaqueIdSchema)
+      .max(1000)
+      .refine((v) => new Set(v).size === v.length),
+  })
+  .strict()
+export const orgAppAccessSchema = z.object({ active: z.boolean() }).strict()
+export type AppRolePermissionsInput = z.infer<typeof appRolePermissionsSchema>
+export type AppRoleAssignmentInput = z.infer<typeof appRoleAssignmentSchema>
+export type OrgAppAccessInput = z.infer<typeof orgAppAccessSchema>
+export type AppDetailDto = AppDto & {
+  resources: ResourceDto[]
+  roles: AppRoleDto[]
+}
 export type AppRegistrationInput = z.infer<typeof appRegistrationSchema>
 export type AppUpdateInput = z.infer<typeof appUpdateSchema>
 export type AppResourceInput = z.infer<typeof appResourceInputSchema>
@@ -248,11 +267,36 @@ export async function registerApp(
     return { ...row, integrationSecret }
   })
 }
-export async function getApp(actor: Actor, slug: string): Promise<AppDto> {
+export async function getApp(
+  actor: Actor,
+  slug: string
+): Promise<AppDetailDto> {
   return run(actor, async (tx, live) => {
     const row = await app(tx, slug)
     await readApp(tx, live, row)
-    return row
+    const resources = bounded(
+      await tx.appResource.findMany({
+        where: { appId: row.id },
+        orderBy: { name: "asc" },
+        take: 1001,
+        select: { appId: true, name: true, description: true, actions: true },
+      })
+    ).map((resource) => ({
+      ...resource,
+      actions: [...resource.actions].sort(),
+      permissions: resource.actions
+        .map((action) => `${row.slug}:${resource.name}:${action}`)
+        .sort(),
+    }))
+    const roles = bounded(
+      await tx.appRole.findMany({
+        where: { appId: row.id },
+        orderBy: { name: "asc" },
+        take: 1001,
+        select: roleSelect,
+      })
+    ).map(roleDto)
+    return { ...row, resources, roles }
   })
 }
 export async function listApps(

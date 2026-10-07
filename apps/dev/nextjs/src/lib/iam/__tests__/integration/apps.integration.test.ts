@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import { PrismaClient } from "@prisma/client"
 import { verify } from "@node-rs/bcrypt"
 import type { Actor } from "../../types"
@@ -17,6 +17,14 @@ import {
   setOrgAppAccess,
 } from "../../apps"
 
+const sessionIdentity = vi.hoisted(() => ({
+  current: { userId: "", sessionId: "" },
+}))
+vi.mock("../../auth-session", () => ({
+  resolveAuthIdentity: async () => sessionIdentity.current,
+}))
+import * as detailRoute from "../../../../../app/api/iam/apps/[appId]/route"
+import * as assignmentRoute from "../../../../../app/api/iam/apps/[appId]/users/[uid]/roles/route"
 const url = process.env.IAM_TEST_DATABASE_URL
 if (!url || new URL(url).pathname !== "/iam_test")
   throw new Error("Dedicated iam_test database required")
@@ -142,6 +150,29 @@ describe.sequential("application service PostgreSQL", () => {
       `${slug}:invoice:read`,
     ])
     expect(role.permissions).toEqual([`${slug}:invoice:read`])
+  })
+  it("returns registered resources and roles in bounded public app detail", async () => {
+    const detail = await getApp(actor, slug)
+    expect(detail.resources).toEqual([
+      {
+        appId,
+        name: "invoice",
+        description: null,
+        actions: ["read", "write"],
+        permissions: [`${slug}:invoice:read`, `${slug}:invoice:write`],
+      },
+    ])
+    expect(detail.roles).toEqual([
+      {
+        id: roleId,
+        appId,
+        name: "editor",
+        description: null,
+        permissions: [`${slug}:invoice:read`],
+      },
+    ])
+    expect(JSON.stringify(detail)).not.toMatch(/integrationSecret|Hash/)
+    await expect(getApp(actor, appId)).rejects.toMatchObject({ status: 404 })
   })
   it("creates a role with registered permissions atomically", async () => {
     const role = await createAppRole(actor, slug, {
@@ -329,6 +360,87 @@ describe.sequential("application service PostgreSQL", () => {
         })
       ).authorizationRevision
     ).toBe(before.authorizationRevision)
+  })
+  it("enforces persisted tenant visibility, assignment and slug identity through real routes", async () => {
+    process.env.IAM_ORIGIN = "https://iam.example"
+    const request = (who: Actor, method = "GET", body?: unknown) => {
+      sessionIdentity.current = {
+        userId: who.context.userId,
+        sessionId: who.context.sessionId,
+      }
+      return new Request("https://iam.example/api/iam/apps", {
+        method,
+        headers: {
+          Origin: "https://iam.example",
+          "X-IAM-Organization": who.context.orgId,
+          "Content-Type": "application/json",
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      })
+    }
+    const route = (appId: string, uid = target) => ({
+      params: Promise.resolve({ appId, uid }),
+    })
+    const detail = await detailRoute.GET(request(tenant), route(slug))
+    expect(detail.status).toBe(200)
+    expect(await detail.json()).toMatchObject({
+      slug,
+      resources: [{ name: "invoice" }],
+    })
+    expect((await detailRoute.GET(request(actor), route(appId))).status).toBe(
+      404
+    )
+    expect(
+      (await detailRoute.GET(request(tenant), route(crmSlug))).status
+    ).toBe(403)
+    expect(
+      (
+        await detailRoute.PATCH(
+          request(tenant, "PATCH", { name: "forged" }),
+          route(slug)
+        )
+      ).status
+    ).toBe(403)
+    expect(
+      (
+        await assignmentRoute.POST(
+          request(actor, "POST", { roleIds: [roleId] }),
+          route(slug)
+        )
+      ).status
+    ).toBe(200)
+    expect(
+      (
+        await assignmentRoute.POST(
+          request(actor, "POST", { roleIds: [roleId] }),
+          route(slug, actor.context.userId)
+        )
+      ).status
+    ).toBe(403)
+    expect(
+      (
+        await assignmentRoute.POST(
+          request(actor, "POST", { roleIds: [roleId] }),
+          route(crmSlug)
+        )
+      ).status
+    ).toBe(403)
+  })
+  it("fails closed when app detail exceeds its resource bound", async () => {
+    await db.appResource.createMany({
+      data: Array.from({ length: 1000 }, (_, i) => ({
+        appId,
+        name: `bounded-${i}`,
+        actions: ["read"],
+      })),
+    })
+    try {
+      await expect(getApp(actor, slug)).rejects.toMatchObject({ status: 403 })
+    } finally {
+      await db.appResource.deleteMany({
+        where: { appId, name: { startsWith: "bounded-" } },
+      })
+    }
   })
   it("rejects expired sessions, inactive users, foreign members and inactive access", async () => {
     await db.iamSession.update({
