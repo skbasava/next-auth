@@ -84,7 +84,7 @@ describe.sequential("authoritative application token issuance", () => {
     expect(protectedHeader.alg).toBe("HS256")
     expect(payload.orgId).toBe(orgId)
     expect(payload.appId).toBe(slug)
-    expect(payload.roles).toEqual(["reader"])
+    expect(payload.roles).toEqual([`${slug}:reader`])
     expect(payload.permissions).toEqual([`${slug}:invoice:read`])
     expect(Number(payload.exp) - Number(payload.iat)).toBe(900)
     expect(await verifyAppToken(token, { appId: slug, orgId })).toEqual(payload)

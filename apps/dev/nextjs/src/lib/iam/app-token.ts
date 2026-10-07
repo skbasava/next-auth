@@ -21,7 +21,22 @@ const claimsSchema = z
     sub: opaqueIdSchema,
     orgId: opaqueIdSchema,
     appId: appSlugSchema,
-    roles: z.array(roleNameSchema).max(1000).refine(unique),
+    roles: z
+      .array(
+        z
+          .string()
+          .max(129)
+          .refine((role) => {
+            const parts = role.split(":")
+            return (
+              parts.length === 2 &&
+              appSlugSchema.safeParse(parts[0]).success &&
+              roleNameSchema.safeParse(parts[1]).success
+            )
+          })
+      )
+      .max(1000)
+      .refine(unique),
     permissions: z.array(permissionKeySchema).max(1000).refine(unique),
     mfaVerified: z.boolean(),
     sessionVersion: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
@@ -35,6 +50,7 @@ const claimsSchema = z
       value.aud !== value.appId ||
       value.exp <= value.iat ||
       value.exp - value.iat > 900 ||
+      value.roles.some((role) => role.split(":")[0] !== value.appId) ||
       value.permissions.some(
         (key) =>
           key.split(":").length !== 3 || key.split(":")[0] !== value.appId
@@ -240,7 +256,11 @@ export async function issueAppToken(
             appId: application.slug,
             sub: userId,
             orgId,
-            roles: [...new Set(assignments.map((a) => a.role.name))].sort(),
+            roles: [
+              ...new Set(
+                assignments.map((a) => `${application.slug}:${a.role.name}`)
+              ),
+            ].sort(),
             permissions: [
               ...new Set(links.map((l) => l.permission.key)),
             ].sort(),
