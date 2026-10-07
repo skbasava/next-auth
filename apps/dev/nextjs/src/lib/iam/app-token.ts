@@ -1,3 +1,5 @@
+import { assertLiveSession } from "./authoritative"
+import { appendAudit } from "./audit"
 import { randomUUID } from "node:crypto"
 import { Prisma } from "@prisma/client"
 import { SignJWT, jwtVerify } from "jose"
@@ -157,26 +159,7 @@ export async function issueAppToken(
           // cannot interleave with issuance's authoritative snapshot.
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(74207001)`
           const now = new Date()
-          const session = await tx.iamSession.findUnique({
-            where: { id: sessionId },
-            select: {
-              userId: true,
-              sessionVersion: true,
-              expiresAt: true,
-              revokedAt: true,
-              mfaVerifiedAt: true,
-              user: { select: { active: true, sessionVersion: true } },
-            },
-          })
-          if (
-            !session ||
-            session.userId !== userId ||
-            !session.user.active ||
-            session.revokedAt ||
-            session.expiresAt <= now ||
-            session.sessionVersion !== session.user.sessionVersion
-          )
-            throw new IamError(401, "invalid_session")
+          const session = await assertLiveSession({ userId, sessionId }, tx)
           const membership = await tx.membership.findUnique({
             where: { orgId_userId: { orgId, userId } },
             select: {
@@ -265,22 +248,34 @@ export async function issueAppToken(
               ...new Set(links.map((l) => l.permission.key)),
             ].sort(),
             mfaVerified,
-            sessionVersion: session.user.sessionVersion,
+            sessionVersion: session.sessionVersion,
             iat,
             exp,
             jti: randomUUID(),
           })
-          await tx.auditLog.create({
-            data: {
-              orgId,
-              actorUserId: userId,
+          await appendAudit(
+            tx,
+            {
+              context: {
+                userId,
+                orgId,
+                sessionId,
+                sessionVersion: session.sessionVersion,
+                roles: [],
+                permissions: [],
+                appRoles: {},
+                appPermissions: {},
+                mfaVerified,
+                authorizationRevision: 0,
+              },
+              meta: { ...meta, requestId },
+            },
+            {
               action: "app.token.issue",
               targetType: "application",
               targetId: application.id,
-              requestId,
-              metadata: {},
-            },
-          })
+            }
+          )
           return token
         },
         {

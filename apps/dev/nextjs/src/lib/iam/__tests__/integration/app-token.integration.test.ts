@@ -12,7 +12,10 @@ const db = new PrismaClient({ datasourceUrl: url })
 const tag = randomUUID().replaceAll("-", "").slice(0, 12),
   slug = `token-${tag}`,
   otherSlug = `other-${tag}`
-let userId: string, orgId: string, sessionId: string, appId: string
+const userId = randomUUID(),
+  orgId = randomUUID(),
+  sessionId = randomUUID()
+let appId: string
 const issue = () =>
   issueAppToken({ userId, sessionId }, orgId, slug, { requestId: tag })
 beforeAll(async () => {
@@ -21,24 +24,25 @@ beforeAll(async () => {
   process.env.APP_JWT_SECRET = "application-secret-at-least-32-bytes"
   process.env.MFA_ENCRYPTION_KEY = Buffer.alloc(32, 5).toString("base64")
   delete process.env.APP_JWT_TTL
-  orgId = (
-    await db.organization.create({ data: { slug, name: "Token tests" } })
-  ).id
-  userId = (
-    await db.user.create({
-      data: { email: `${tag}@example.test`, passwordHash: "PRIVATE_HASH" },
-    })
-  ).id
+  await db.organization.create({
+    data: { id: orgId, slug, name: "Token tests" },
+  })
+  await db.user.create({
+    data: {
+      id: userId,
+      email: `${tag}@example.test`,
+      passwordHash: "PRIVATE_HASH",
+    },
+  })
   await db.membership.create({ data: { orgId, userId } })
-  sessionId = (
-    await db.iamSession.create({
-      data: {
-        userId,
-        sessionVersion: 0,
-        expiresAt: new Date(Date.now() + 3600000),
-      },
-    })
-  ).id
+  await db.iamSession.create({
+    data: {
+      id: sessionId,
+      userId,
+      sessionVersion: 0,
+      expiresAt: new Date(Date.now() + 3600000),
+    },
+  })
   for (const s of [slug, otherSlug]) {
     const app = await db.application.create({
       data: { slug: s, name: s, integrationSecretHash: "PRIVATE_SECRET_HASH" },
@@ -66,11 +70,11 @@ beforeAll(async () => {
 })
 afterAll(async () => {
   await db.auditLog.deleteMany({ where: { requestId: tag } })
-  await db.organization.deleteMany({ where: { id: orgId } })
+  if (orgId) await db.organization.deleteMany({ where: { id: orgId } })
   await db.application.deleteMany({
     where: { slug: { in: [slug, otherSlug] } },
   })
-  await db.user.deleteMany({ where: { id: userId } })
+  if (userId) await db.user.deleteMany({ where: { id: userId } })
   await db.$disconnect()
 })
 describe.sequential("authoritative application token issuance", () => {

@@ -1,10 +1,14 @@
 import { randomBytes } from "node:crypto"
 import { hash } from "@node-rs/bcrypt"
+import { appendAudit } from "./audit"
+import {
+  withIamTransaction,
+  incrementAuthorizationRevision,
+} from "./authoritative"
 import { Prisma } from "@prisma/client"
 import { z } from "zod"
-import { prisma } from "../prisma"
 import { IamError } from "./errors"
-import { CORE_PERMISSION_KEYS, CORE_PERMISSIONS } from "./policy"
+import { CORE_PERMISSIONS } from "./policy"
 import type { Actor, Page } from "./types"
 import {
   actionSchema,
@@ -138,69 +142,13 @@ function bounded<T>(rows: T[]): T[] {
   return rows
 }
 type Tx = Prisma.TransactionClient
-/** Private bridge until Task9: trust only IDs/version from Actor, reload all grants.
- * Runs within the same serializable transaction as each service operation.
- */
-async function liveActor(tx: Tx, actor: Actor) {
-  const { userId, orgId, sessionId, sessionVersion } = actor.context
-  parse(opaqueIdSchema, userId)
-  parse(opaqueIdSchema, orgId)
-  parse(opaqueIdSchema, sessionId)
-  const session = await tx.iamSession.findUnique({
-    where: { id: sessionId },
-    include: {
-      user: {
-        select: { active: true, systemAdmin: true, sessionVersion: true },
-      },
-    },
-  })
-  if (
-    !session ||
-    session.userId !== userId ||
-    !session.user.active ||
-    session.revokedAt ||
-    session.expiresAt <= new Date() ||
-    session.sessionVersion !== session.user.sessionVersion ||
-    sessionVersion !== session.user.sessionVersion
-  )
-    throw new IamError(401, "invalid_session")
-  const membership = await tx.membership.findUnique({
-    where: { orgId_userId: { orgId, userId } },
-    include: { organization: true },
-  })
-  if (!membership?.active || !membership.organization.active) forbidden()
-  if (membership.organization.requireMfa && !session.mfaVerifiedAt) forbidden()
-  const links = bounded(
-    await tx.rolePermission.findMany({
-      where: {
-        orgId,
-        role: { users: { some: { orgId, userId } } },
-        permission: { appId: null },
-      },
-      select: {
-        permission: { select: { key: true, resource: true, action: true } },
-      },
-      take: 1001,
-    })
-  )
-  const permissions = new Set(
-    links
-      .filter(
-        ({ permission: p }) =>
-          p.key === `${p.resource}:${p.action}` &&
-          (CORE_PERMISSION_KEYS as readonly string[]).includes(p.key)
-      )
-      .map((l) => l.permission.key)
-  )
-  return {
-    userId,
-    orgId,
-    systemAdmin: session.user.systemAdmin,
-    permissions,
-    mfaVerified: !!session.mfaVerifiedAt,
-  }
+type LiveActor = {
+  userId: string
+  orgId: string
+  systemAdmin: boolean
+  permissions: Set<string>
+  mfaVerified: boolean
 }
-type LiveActor = Awaited<ReturnType<typeof liveActor>>
 function system(live: LiveActor) {
   if (!live.systemAdmin) forbidden()
 }
@@ -232,13 +180,7 @@ async function readApp(tx: Tx, live: LiveActor, application: AppDto) {
     await appAccess(tx, live, application)
   }
 }
-async function revision(tx: Tx, orgIds: string[]) {
-  if (orgIds.length)
-    await tx.organization.updateMany({
-      where: { id: { in: orgIds } },
-      data: { authorizationRevision: { increment: 1 } },
-    })
-}
+const revision = incrementAuthorizationRevision
 async function appRevision(tx: Tx, appId: string) {
   await tx.organization.updateMany({
     where: { appAccess: { some: { appId } } },
@@ -253,52 +195,21 @@ async function audit(
   targetId: string,
   orgId = actor.context.orgId
 ) {
-  // Fixed metadata only; bodies, secrets, supplied claims and raw errors never enter audit.
-  await tx.auditLog.create({
-    data: {
-      orgId,
-      actorUserId: actor.context.userId,
-      action,
-      targetType,
-      targetId,
-      requestId: parse(z.string().min(1).max(128), actor.meta.requestId),
-      metadata: {},
-    },
-  })
+  await appendAudit(tx, actor, { action, targetType, targetId, orgId })
 }
-/** Serialize application operations using a transaction-scoped advisory lock.
- * Serializable retries also protect against writes in other IAM services. Lock
- * order is global catalog lock before authoritative reads/row writes.
- */
 async function run<T>(
   actor: Actor,
   operation: (tx: Tx, live: LiveActor) => Promise<T>
 ): Promise<T> {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      return await prisma.$transaction(
-        async (tx) => {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(74207001)`
-          const live = await liveActor(tx, actor)
-          return operation(tx, live)
-        },
-        {
-          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-          timeout: 15000,
-          maxWait: 15000,
-        }
-      )
-    } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError) {
-        if (error.code === "P2034" && attempt < 4) continue
-        if (error.code === "P2002") throw new IamError(409, "already_exists")
-        if (error.code === "P2025") throw new IamError(404, "not_found")
-      }
-      if (error instanceof IamError) throw error
-      throw new IamError(503, "service_unavailable")
-    }
-  }
-  throw new IamError(503, "service_unavailable")
+  return withIamTransaction(actor, (tx, { live, context }) =>
+    operation(tx, {
+      userId: live.userId,
+      orgId: live.orgId,
+      systemAdmin: live.systemAdmin,
+      mfaVerified: live.mfaVerified,
+      permissions: new Set(context.permissions),
+    })
+  )
 }
 function roleDto(row: {
   id: string
