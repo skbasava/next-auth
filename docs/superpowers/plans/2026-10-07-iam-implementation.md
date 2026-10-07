@@ -302,7 +302,7 @@ Use explicit exported DTO/input types in each owning module; schema-inferred inp
 - [x] Document exact install/generate/migration/seed/test/typecheck/start commands and dedicated Docker startup/readiness commands. Preserve SQLite-to-PostgreSQL migration limitation.
 - [x] Provide ERP sample with offline jose validation of HS256, issuer, audience, expiry, required claims, expected tenant and exact permissions. State controlled shared-secret trust and maximum 15-minute offline revocation window.
 - [x] Test documented commands in their stated directory and run seed twice. Use test mail transport; separately report real Resend delivery as unverified unless securely configured and explicitly exercised.
-- [ ] Controller: save prepared, validated reusable cloud install/start draft after review; publication and fresh-task restoration are unverified.
+- [x] Controller saved the reviewed, validated reusable cloud install/start draft; publication and fresh-task restoration remain unverified.
 - [x] Final report: architecture, schema/history, created/modified files, endpoint inventory, environment variables, migration/seed commands, real test results, limitations and ERP integration example. Mark complete only when the uploaded Definition of Done is satisfied.
 
 ## Execution and review handoff
