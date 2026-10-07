@@ -11,6 +11,7 @@
   "include": [
     "auth.ts",
     "auth.config.ts",
+    "middleware.ts",
     "src/lib/**/*.ts",
     "vitest.config.ts",
     "prisma/seed/**/*.ts"

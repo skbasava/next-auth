@@ -1,11 +1,33 @@
-export { auth as middleware } from "auth"
+import NextAuth from "next-auth"
+import { NextResponse } from "next/server"
+import authConfig from "./auth.config"
 
-// Or like this if you need to do something here.
-// export default auth((req) => {
-//   console.log(req.auth) //  { session: { user: { ... } } }
-// })
+// Edge cookie validation is only a coarse gate. Node handlers must reload the
+// live IAM session/membership and enforce permissions, MFA and mutation origin.
+export const { auth: middleware } = NextAuth({
+  ...authConfig,
+  callbacks: {
+    authorized({ auth, request }) {
+      const path = request.nextUrl.pathname
+      // SCIM handlers authenticate their own purpose-scoped bearer credentials.
+      if (path === "/api/iam/scim" || path.startsWith("/api/iam/scim/"))
+        return true
+      if (path === "/api/iam" || path.startsWith("/api/iam/")) {
+        if (!auth?.user)
+          return NextResponse.json(
+            { error: "unauthorized" },
+            { status: 401, headers: { "Cache-Control": "no-store" } }
+          )
+      }
+      // Preserve the existing public ordinary-page middleware behavior.
+      return true
+    },
+  },
+})
 
-// Read more: https://nextjs.org/docs/app/building-your-application/routing/middleware#matcher
 export const config = {
-  matcher: ["/((?!api|_next/static|_next/image|favicon.ico).*)"],
+  matcher: [
+    "/api/iam/:path*",
+    "/((?!api|_next/static|_next/image|favicon.ico).*)",
+  ],
 }
