@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "allowJs": false,
+    "incremental": false,
+    "moduleResolution": "bundler",
+    "types": ["node", "vitest/globals"],
+    "paths": { "@/*": ["./src/*"] }
+  },
+  "include": ["src/lib/**/*.ts", "vitest.config.ts", "prisma/seed/**/*.ts"],
+  "exclude": ["node_modules"]
+}

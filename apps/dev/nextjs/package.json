@@ -7,17 +7,34 @@
     "clean": "rm -rf .next",
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test:iam": "vitest run --config vitest.config.ts --exclude \"**/*.integration.test.ts\"",
+    "test:iam:integration": "vitest run --config vitest.config.ts src/lib/iam/__tests__/integration",
+    "typecheck:iam": "tsc --project tsconfig.iam.json",
+    "prisma:generate": "prisma generate",
+    "prisma:seed": "tsx prisma/seed/iam.ts"
   },
   "license": "ISC",
   "dependencies": {
+    "@auth/prisma-adapter": "workspace:^",
+    "@node-rs/bcrypt": "1.10.7",
+    "@prisma/client": "6.0.0",
+    "ioredis": "5.4.1",
+    "jose": "6.2.3",
     "next": "15.5.18",
     "next-auth": "workspace:*",
+    "otplib": "12.0.1",
+    "qrcode": "1.5.4",
     "react": "19.0.0-rc-4c58fce7-20240904",
-    "react-dom": "19.0.0-rc-4c58fce7-20240904"
+    "react-dom": "19.0.0-rc-4c58fce7-20240904",
+    "resend": "6.12.3",
+    "zod": "3.25.48"
   },
   "devDependencies": {
+    "@types/qrcode": "1.5.5",
     "@types/react": "^18.2.23",
-    "@types/react-dom": "^18.2.8"
+    "@types/react-dom": "^18.2.8",
+    "prisma": "6.0.0",
+    "tsx": "4.22.4"
   }
 }
