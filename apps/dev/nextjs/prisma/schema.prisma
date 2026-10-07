@@ -337,6 +337,8 @@ model AuditLog {
 }
 
 model ScimIdentity {
+  // Tenant-local SCIM profile; canonical global User fields remain independent.
+  profile    Json?
   orgId      String
   userId     String
   id         String     @default(cuid())
