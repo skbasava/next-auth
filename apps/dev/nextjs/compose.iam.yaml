@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: iam_local
+      POSTGRES_PASSWORD: ${IAM_POSTGRES_PASSWORD:?Load IAM local environment}
+      POSTGRES_DB: iam_local
+    ports: ["127.0.0.1:55432:5432"]
+    volumes: ["iam_postgres16:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iam_local -d iam_local"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  redis:
+    image: redis:7
+    environment:
+      IAM_REDIS_PASSWORD: ${IAM_REDIS_PASSWORD:?Load IAM local environment}
+    command:
+      ["sh", "-c", 'exec redis-server --requirepass "$$IAM_REDIS_PASSWORD"']
+    ports: ["127.0.0.1:56379:6379"]
+    volumes: ["iam_redis7:/data"]
+volumes:
+  iam_postgres16:
+  iam_redis7:

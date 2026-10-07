@@ -79,3 +79,42 @@ MfaCredential stores versioned authenticated-encryption envelopes for pending/en
 Audit metadata JSON must contain bounded allowlisted sanitized data only; schema JSON does not prove sanitization. Nullable audit orgId permits safe authentication events before tenant resolution; tenant audit queries must explicitly filter verified orgId. Scalar actor/creator IDs preserve attribution. Tenant pagination indexes, session lookups, unique key prefix and external SCIM indexes are defined. No defaults/seed implicitly grant user privileges, memberships or application access. Later seeds may explicitly create a named sample organization and its tenant roles without assigning users.
 
 Use Node22/pnpm9 with documented writable caches. Validation can use a non-secret placeholder URL without connecting to a database. Generation and migration are separate required gates; preserve TLS/checksum verification for engine downloads.
+
+## Dedicated PostgreSQL and Redis workflow
+
+From `apps/dev/nextjs`, source `scripts/iam-local-env.sh` before every IAM
+command. It activates Node22/pnpm9, writable caches and only verified dedicated
+loopback service URLs. Local credentials live outside git at
+`/workspace/iam-local/services.env` (mode 0600); never print or commit them.
+For a new machine generate `IAM_POSTGRES_PASSWORD` and `IAM_REDIS_PASSWORD`
+using cryptographic random hex (24 bytes each) in that file before sourcing.
+Do not reuse an ambient DATABASE_URL.
+
+```sh
+source scripts/iam-local-env.sh
+docker compose -p next-auth-iam -f compose.iam.yaml up -d --wait
+docker compose -p next-auth-iam -f compose.iam.yaml exec -T postgres pg_isready -U iam_local -d iam_local
+docker compose -p next-auth-iam -f compose.iam.yaml exec -T redis sh -c 'REDISCLI_AUTH="$IAM_REDIS_PASSWORD" redis-cli ping'
+# First initialization only; do not drop/reset an existing database:
+docker compose -p next-auth-iam -f compose.iam.yaml exec -T postgres createdb -U iam_local iam_test
+pnpm exec prisma migrate deploy
+DATABASE_URL="$IAM_TEST_DATABASE_URL" pnpm exec prisma migrate deploy
+pnpm exec prisma generate
+pnpm exec prisma migrate status
+pnpm typecheck:iam
+pnpm test:iam:integration
+```
+
+Dedicated project volumes preserve data across restarts; PostgreSQL16 and Redis7
+bind only loopback ports 55432/56379. Initial PostgreSQL migration includes the
+partial core-permission unique index and reciprocal immediate constraint triggers.
+Core-role assignments lock the referenced Permission row FOR UPDATE until commit,
+serializing against scope changes in either order. A second migration also
+advances the locked permission tuple version so stale repeatable-read snapshots
+fail serialization safely. Integration tests roll back
+fixtures, exercise composite foreign keys and concurrent connections. A fresh
+`iam_test_fresh` database independently reproduced the complete migration history.
+
+The environment script fails when the credential file or either credential is
+missing. It never generates or rotates credentials: restore the original file
+for existing persistent volumes, rather than generating mismatched credentials.
