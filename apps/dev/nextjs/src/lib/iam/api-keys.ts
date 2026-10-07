@@ -208,3 +208,48 @@ export async function revokeApiKey(actor: Actor, keyId: string): Promise<void> {
     { permission: { resource: "api-keys", action: "revoke" } }
   )
 }
+
+export async function listApiKeys(
+  actor: Actor,
+  page: import("./validation").PaginationInput
+): Promise<import("./types").Page<ApiKeyDto>> {
+  const { paginationSchema } = await import("./validation")
+  const parsed = paginationSchema.safeParse(page)
+  if (!parsed.success) throw new IamError(400, "invalid_input")
+  const { limit, cursor } = parsed.data
+  return withIamTransaction(
+    actor,
+    async (tx, { context }) => {
+      const rows = await tx.apiKey.findMany({
+        where: {
+          orgId: context.orgId,
+          ...(cursor ? { id: { gt: cursor } } : {}),
+        },
+        orderBy: { id: "asc" },
+        take: limit + 1,
+        select: {
+          id: true,
+          orgId: true,
+          name: true,
+          prefix: true,
+          purpose: true,
+          permissionKeys: true,
+          createdAt: true,
+          expiresAt: true,
+          revokedAt: true,
+        },
+      })
+      const more = rows.length > limit
+      if (more) rows.pop()
+      return {
+        items: rows.map(({ permissionKeys, purpose, ...row }) => ({
+          ...row,
+          permissions: permissionKeys,
+          purpose: purpose === "SCIM" ? ("scim" as const) : ("api" as const),
+        })),
+        nextCursor: more ? rows[rows.length - 1].id : null,
+      }
+    },
+    { permission: { resource: "api-keys", action: "read" } }
+  )
+}

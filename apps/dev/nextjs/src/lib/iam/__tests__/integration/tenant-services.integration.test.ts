@@ -36,6 +36,7 @@ const grants = [
   "roles:read",
   "roles:create",
   "roles:update",
+  "roles:delete",
   "roles:assign",
   "roles:grant",
   "user:read",
@@ -299,4 +300,47 @@ it("forged context grants fail closed and invalid audit metadata rolls back muta
   expect(
     await db.role.count({ where: { orgId, name: "audit-rollback" } })
   ).toBe(0)
+})
+
+it("role update/delete enforce tenant scope and transactional revision/audit", async () => {
+  const r = await roles.createRole(actor, { name: "editable" })
+  const before = await db.organization.findUniqueOrThrow({
+    where: { id: orgId },
+  })
+  expect(
+    await roles.updateRole(actor, r.id, {
+      name: "edited",
+      description: "Public",
+    })
+  ).toMatchObject({ name: "edited", description: "Public" })
+  await expect(
+    roles.updateRole(actor, foreignRoleId, { name: "foreign" })
+  ).rejects.toMatchObject({ status: 404 })
+  await expect(
+    roles.updateRole(actor, r.id, { permissionKeys: [] } as never)
+  ).rejects.toMatchObject({ status: 400 })
+  await expect(roles.deleteRole(actor, foreignRoleId)).rejects.toMatchObject({
+    status: 404,
+  })
+  await expect(
+    roles.deleteRole({ ...actor, meta: { requestId: "" } }, r.id)
+  ).rejects.toMatchObject({ status: 400 })
+  expect(await roles.getRole(actor, r.id)).toMatchObject({ name: "edited" })
+  await roles.deleteRole(actor, r.id)
+  await expect(roles.getRole(actor, r.id)).rejects.toMatchObject({
+    status: 404,
+  })
+  expect(
+    (await db.organization.findUniqueOrThrow({ where: { id: orgId } }))
+      .authorizationRevision
+  ).toBe(before.authorizationRevision + 2)
+  expect(
+    await db.auditLog.count({
+      where: {
+        orgId,
+        targetId: r.id,
+        action: { in: ["role.updated", "role.deleted"] },
+      },
+    })
+  ).toBe(2)
 })

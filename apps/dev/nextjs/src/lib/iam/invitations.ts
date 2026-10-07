@@ -243,3 +243,46 @@ export async function acceptInvitation(
   }
   throw new IamError(503, "service_unavailable")
 }
+
+export async function listInvitations(
+  actor: Actor,
+  page: import("./validation").PaginationInput
+): Promise<import("./types").Page<InvitationDto>> {
+  const { paginationSchema } = await import("./validation")
+  const parsed = paginationSchema.safeParse(page)
+  if (!parsed.success) throw new IamError(400, "invalid_input")
+  const { limit, cursor } = parsed.data
+  return withIamTransaction(
+    actor,
+    async (tx, { context }) => {
+      const rows = await tx.invitation.findMany({
+        where: {
+          orgId: context.orgId,
+          ...(cursor ? { id: { gt: cursor } } : {}),
+        },
+        orderBy: { id: "asc" },
+        take: limit + 1,
+        select: {
+          id: true,
+          orgId: true,
+          email: true,
+          createdAt: true,
+          expiresAt: true,
+          acceptedAt: true,
+          revokedAt: true,
+          roles: { take: 1001, select: { roleId: true } },
+        },
+      })
+      const more = rows.length > limit
+      if (more) rows.pop()
+      return {
+        items: rows.map(({ roles, ...row }) => {
+          if (roles.length > 1000) throw new IamError(403, "forbidden")
+          return { ...row, roleIds: roles.map((r) => r.roleId) }
+        }),
+        nextCursor: more ? rows[rows.length - 1].id : null,
+      }
+    },
+    { permission: { resource: "invitations", action: "read" } }
+  )
+}

@@ -29,9 +29,11 @@ const orgId = randomUUID(),
   foreignRoleId = randomUUID(),
   tag = randomUUID()
 const grants = [
+  "api-keys:read",
   "api-keys:create",
   "api-keys:grant",
   "api-keys:revoke",
+  "invitations:read",
   "invitations:create",
   "roles:grant",
   "roles:assign",
@@ -549,4 +551,30 @@ it("verified invitation acceptance can bootstrap membership before required MFA 
       data: { requireMfa: false },
     })
   }
+})
+
+it("lists tenant keys and invitations with bounded pagination and no credential hashes", async () => {
+  await keys.createApiKey(actor, {
+    name: "first",
+    purpose: "api",
+    permissionKeys: ["user:read"],
+    expiresAt: new Date(Date.now() + 3600000),
+  })
+  await keys.createApiKey(actor, {
+    name: "second",
+    purpose: "api",
+    permissionKeys: [],
+    expiresAt: new Date(Date.now() + 3600000),
+  })
+  await invitations.createInvitation(actor, input)
+  const page = await keys.listApiKeys(actor, { limit: 1 })
+  expect(page.items).toHaveLength(1)
+  expect(page.nextCursor).not.toBeNull()
+  expect(JSON.stringify(page)).not.toMatch(/secretHash|rawKey/)
+  const invites = await invitations.listInvitations(actor, { limit: 1 })
+  expect(invites.items).toHaveLength(1)
+  expect(JSON.stringify(invites)).not.toContain("tokenHash")
+  await expect(keys.listApiKeys(actor, { limit: 101 })).rejects.toMatchObject({
+    status: 400,
+  })
 })

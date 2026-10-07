@@ -295,3 +295,58 @@ export async function assignCoreRoles(
     { permission: { resource: "roles", action: "assign" } }
   )
 }
+export const roleUpdateSchema = roleCreateSchema
+  .omit({ permissionKeys: true })
+  .partial()
+  .refine((v) => Object.keys(v).length > 0)
+export type RoleUpdateInput = z.infer<typeof roleUpdateSchema>
+export async function updateRole(
+  actor: Actor,
+  roleId: string,
+  input: RoleUpdateInput
+): Promise<RoleDto> {
+  roleId = parse(opaqueIdSchema, roleId)
+  const data = parse(roleUpdateSchema, input)
+  return withIamTransaction(
+    actor,
+    async (tx, { context }) => {
+      const existing = await tx.role.findUnique({
+        where: { orgId_id: { orgId: context.orgId, id: roleId } },
+        select: { id: true },
+      })
+      if (!existing) throw new IamError(404, "not_found")
+      const row = await tx.role.update({
+        where: { orgId_id: { orgId: context.orgId, id: roleId } },
+        data,
+        select,
+      })
+      await incrementAuthorizationRevision(tx, [context.orgId])
+      await appendAudit(tx, actor, {
+        action: "role.updated",
+        targetType: "role",
+        targetId: roleId,
+      })
+      return dto(row)
+    },
+    { permission: { resource: "roles", action: "update" } }
+  )
+}
+export async function deleteRole(actor: Actor, roleId: string): Promise<void> {
+  roleId = parse(opaqueIdSchema, roleId)
+  await withIamTransaction(
+    actor,
+    async (tx, { context }) => {
+      const deleted = await tx.role.deleteMany({
+        where: { orgId: context.orgId, id: roleId },
+      })
+      if (deleted.count !== 1) throw new IamError(404, "not_found")
+      await incrementAuthorizationRevision(tx, [context.orgId])
+      await appendAudit(tx, actor, {
+        action: "role.deleted",
+        targetType: "role",
+        targetId: roleId,
+      })
+    },
+    { permission: { resource: "roles", action: "delete" } }
+  )
+}
