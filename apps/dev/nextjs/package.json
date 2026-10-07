@@ -11,6 +11,7 @@
     "test:iam": "vitest run --config vitest.config.ts --exclude \"**/*.integration.test.ts\"",
     "test:iam:integration": "vitest run --config vitest.integration.config.ts",
     "test:iam:http": "node scripts/iam-http-e2e.mjs",
+    "test:iam:http:lifecycle": "node --test scripts/iam-http-lifecycle.test.mjs",
     "typecheck:iam": "tsc --project tsconfig.iam.json",
     "prisma:generate": "prisma generate",
     "prisma:seed": "tsx prisma/seed/iam.ts"

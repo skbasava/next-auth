@@ -2,6 +2,12 @@
  * Creates bcrypt fixture users explicitly for this run, never bootstraps production.
  * Owns its Next process and exact fixture IDs. Never logs credentials or responses.
  */
+import {
+  stopped,
+  observeExit,
+  stopOwnedProcess,
+  recoverOwnedApps,
+} from "./iam-http-lifecycle.mjs"
 import { writeFile, unlink } from "node:fs/promises"
 import { randomBytes, randomUUID } from "node:crypto"
 import { createRequire } from "node:module"
@@ -28,6 +34,9 @@ if (redis.hostname !== "127.0.0.1" || redis.port !== "56379")
 process.env.DATABASE_URL = url.href
 const db = new PrismaClient({ datasourceUrl: url.href })
 const run = randomUUID().replaceAll("-", "")
+const erp = `erp-${run}`,
+  crm = `crm-${run}`
+const appSlugs = [erp, crm]
 const org = randomUUID(),
   otherOrg = randomUUID(),
   admin = randomUUID(),
@@ -44,6 +53,7 @@ const save = () =>
       orgs: [org, otherOrg],
       users,
       apps,
+      appSlugs,
       permissions: ownedPermissions,
     }),
     { mode: 0o600 }
@@ -52,6 +62,7 @@ const password = randomBytes(32).toString("base64url")
 const signingSecret = randomBytes(48).toString("base64url")
 const cookies = new Map()
 let server,
+  serverExited,
   requests = 0,
   checks = 0
 function check(value, label) {
@@ -247,9 +258,10 @@ try {
     ],
     { cwd: new URL("../", import.meta.url), env, stdio: "ignore" }
   )
+  serverExited = observeExit(server)
   let ready = false
   for (let i = 0; i < 120; i++) {
-    if (server.exitCode !== null)
+    if (stopped(server))
       throw new Error("Owned Next server exited before readiness")
     try {
       if ((await fetch(`${origin}/auth/csrf`)).status === 200) {
@@ -262,9 +274,7 @@ try {
   check(ready, "owned real production Next.js server ready")
   const adminSession = await login(admin),
     memberSession = await login(member)
-  const erp = `erp-${run}`,
-    crm = `crm-${run}`
-  for (const slug of [erp, crm]) {
+  for (const slug of appSlugs) {
     const app = await request("/api/iam/apps", {
       who: admin,
       method: "POST",
@@ -541,17 +551,8 @@ try {
   )
   process.exitCode = 1
 } finally {
-  if (server && server.exitCode === null) {
-    server.kill("SIGTERM")
-    await Promise.race([
-      new Promise((resolve) => server.once("exit", resolve)),
-      delay(5000),
-    ])
-    if (server.exitCode === null) {
-      server.kill("SIGKILL")
-      await new Promise((resolve) => server.once("exit", resolve))
-    }
-  }
+  if (server) await stopOwnedProcess(server, serverExited)
+  await recoverOwnedApps(db, appSlugs, apps)
   // Discover SCIM-created user IDs before deleting the exact owned organizations,
   // including a response/assertion failure immediately after successful creation.
   const scimUsers = await db.scimIdentity.findMany({
@@ -584,7 +585,7 @@ try {
     remaining.every((count) => count === 0),
     "exact owned PostgreSQL fixtures removed"
   )
-  check(!server || server.exitCode !== null, "owned Next.js server stopped")
+  check(!server || stopped(server), "owned Next.js server stopped")
   const cache = new Redis(process.env.REDIS_URL, { maxRetriesPerRequest: 2 })
   try {
     let cursor = "0"
