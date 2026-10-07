@@ -8,6 +8,12 @@
     "types": ["node", "vitest/globals"],
     "paths": { "@/*": ["./src/*"] }
   },
-  "include": ["src/lib/**/*.ts", "vitest.config.ts", "prisma/seed/**/*.ts"],
+  "include": [
+    "auth.ts",
+    "auth.config.ts",
+    "src/lib/**/*.ts",
+    "vitest.config.ts",
+    "prisma/seed/**/*.ts"
+  ],
   "exclude": ["node_modules"]
 }
