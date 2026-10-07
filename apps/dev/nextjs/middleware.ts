@@ -9,7 +9,8 @@ export const { auth: middleware } = NextAuth({
   callbacks: {
     authorized({ auth, request }) {
       const path = request.nextUrl.pathname
-      // SCIM handlers authenticate their own purpose-scoped bearer credentials.
+      // Exact offline verification and SCIM authenticate their own bearer credentials.
+      if (path === "/api/iam/verify") return true
       if (path === "/api/iam/scim" || path.startsWith("/api/iam/scim/"))
         return true
       if (path === "/api/iam" || path.startsWith("/api/iam/")) {

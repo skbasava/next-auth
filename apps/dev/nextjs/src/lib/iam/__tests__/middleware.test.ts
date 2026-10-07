@@ -149,3 +149,16 @@ it("keeps the transitive middleware import graph free of Node-only application s
   }
   visit(resolve(appRoot, "middleware.ts"))
 })
+
+it("leaves only the exact bearer verification path reachable without a cookie", async () => {
+  expect(
+    (await request("/api/iam/verify"))?.headers.get("x-middleware-next")
+  ).toBe("1")
+  for (const path of [
+    "/api/iam/verify/child",
+    "/api/iam/verify-other",
+    "/api/iam/token",
+  ]) {
+    expect((await request(path))?.status).toBe(401)
+  }
+})

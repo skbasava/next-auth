@@ -18,6 +18,7 @@ const tag = randomUUID().replaceAll("-", "").slice(0, 12),
   otherSlug = `other-${tag}`
 const userId = randomUUID(),
   orgId = randomUUID(),
+  secondOrgId = randomUUID(),
   sessionId = randomUUID()
 let appId: string
 const request = (
@@ -96,10 +97,24 @@ beforeAll(async () => {
       data: { orgId, userId, appId: app.id, roleId: role.id },
     })
   }
+  await db.organization.create({
+    data: { id: secondOrgId, slug: `second-${tag}`, name: "Second tenant" },
+  })
+  await db.membership.create({ data: { orgId: secondOrgId, userId } })
+  await db.orgAppAccess.create({ data: { orgId: secondOrgId, appId } })
+  const foreignRole = await db.appRole.create({
+    data: { appId, name: "foreign" },
+  })
+  await db.userAppRole.create({
+    data: { orgId: secondOrgId, userId, appId, roleId: foreignRole.id },
+  })
 })
 afterAll(async () => {
   await db.auditLog.deleteMany({ where: { orgId } })
-  if (orgId) await db.organization.deleteMany({ where: { id: orgId } })
+  if (orgId)
+    await db.organization.deleteMany({
+      where: { id: { in: [orgId, secondOrgId] } },
+    })
   await db.application.deleteMany({
     where: { slug: { in: [slug, otherSlug] } },
   })
@@ -175,6 +190,38 @@ describe.sequential("token POST authoritative issuance", () => {
         { now: new Date(Number(payload.exp) * 1000) }
       )
     ).rejects.toMatchObject({ status: 401 })
+  })
+  it("isolates real tenant assignments and verifies the issued token through the offline route after revocation", async () => {
+    const token = await issue()
+    const second = await request({ appId: slug }, secondOrgId)
+    expect(second.status).toBe(200)
+    const secondToken = (await second.json()).token
+    expect(
+      (await verifyAppToken(secondToken, { appId: slug, orgId: secondOrgId }))
+        .roles
+    ).toEqual([`${slug}:foreign`])
+    const { GET } = await import("../../../../../app/api/iam/verify/route")
+    await db.iamSession.update({
+      where: { id: sessionId },
+      data: { revokedAt: new Date() },
+    })
+    try {
+      expect((await request()).status).toBe(401)
+      const response = await GET(
+        new Request(
+          `http://localhost/api/iam/verify?appId=${slug}&orgId=${orgId}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        )
+      )
+      expect(response.status).toBe(200)
+      expect(response.headers.get("Cache-Control")).toBe("no-store")
+      expect((await response.json()).roles).toEqual([`${slug}:reader`])
+    } finally {
+      await db.iamSession.update({
+        where: { id: sessionId },
+        data: { revokedAt: null },
+      })
+    }
   })
   it("rejects absent/inactive access without bypass for system administrators", async () => {
     const noAccess = await db.application.create({
