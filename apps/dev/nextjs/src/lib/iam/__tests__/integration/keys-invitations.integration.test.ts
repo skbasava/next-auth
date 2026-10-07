@@ -3,6 +3,8 @@ import { PrismaClient } from "@prisma/client"
 import { verify } from "@node-rs/bcrypt"
 import { beforeAll, afterAll, beforeEach, expect, it, vi } from "vitest"
 import type { Actor } from "../../types"
+const cookie = vi.hoisted(() => ({ resolve: vi.fn() }))
+vi.mock("../../auth-session", () => ({ resolveAuthIdentity: cookie.resolve }))
 // Only unavoidable mail transport is mocked; all authority and storage use PostgreSQL.
 const mail = vi.hoisted(() => ({
   send: vi.fn(),
@@ -577,4 +579,112 @@ it("lists tenant keys and invitations with bounded pagination and no credential 
   await expect(keys.listApiKeys(actor, { limit: 101 })).rejects.toMatchObject({
     status: 400,
   })
+})
+
+it("HTTP invitation race accepts once without membership or MFA, and audit excludes token path", async () => {
+  cookie.resolve.mockResolvedValue(identity)
+  process.env.IAM_ORIGIN = "https://iam.example"
+  await db.organization.update({
+    where: { id: orgId },
+    data: { requireMfa: true },
+  })
+  await db.iamSession.update({
+    where: { id: sessionId },
+    data: { mfaVerifiedAt: new Date() },
+  })
+  await invitations.createInvitation(actor, input)
+  const raw = token()
+  const route = await import(
+    "../../../../../app/api/iam/invitations/[token]/accept/route"
+  )
+  const req = () =>
+    new Request(`https://iam.example/api/iam/invitations/${raw}/accept`, {
+      method: "POST",
+      headers: {
+        Origin: "https://iam.example",
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    })
+  const results = await Promise.all([
+    route.POST(req(), { params: Promise.resolve({ token: raw }) }),
+    route.POST(req(), { params: Promise.resolve({ token: raw }) }),
+  ])
+  expect(results.map((r) => r.status).sort()).toEqual([200, 403])
+  expect(
+    results.every((r) => r.headers.get("Cache-Control") === "no-store")
+  ).toBe(true)
+  expect(
+    await db.membership.count({ where: { orgId, userId: inviteeId } })
+  ).toBe(1)
+  const logs = await db.auditLog.findMany({
+    where: { orgId, action: "invitation.accepted" },
+  })
+  expect(JSON.stringify(logs)).not.toContain(raw)
+})
+it("SCIM HTTP uses real persisted bearer purpose and standard bounded errors, isolates foreign IDs", async () => {
+  const ownScimId = randomUUID(),
+    foreignScimId = randomUUID()
+  await db.membership.create({
+    data: { orgId: foreignOrgId, userId: inviteeId },
+  })
+  await db.scimIdentity.createMany({
+    data: [
+      { orgId, userId, id: ownScimId, userName: "http-own" },
+      {
+        orgId: foreignOrgId,
+        userId: inviteeId,
+        id: foreignScimId,
+        userName: "http-foreign",
+      },
+    ],
+  })
+  const scim = await keys.createApiKey(actor, {
+    name: "http-scim",
+    purpose: "scim",
+    permissionKeys: ["scim:read"],
+    expiresAt: new Date(Date.now() + 3600000),
+  })
+  const api = await keys.createApiKey(actor, {
+    name: "http-api",
+    purpose: "api",
+    permissionKeys: [],
+    expiresAt: new Date(Date.now() + 3600000),
+  })
+  const collection = await import(
+    "../../../../../app/api/iam/scim/v2/Users/route"
+  )
+  const resource = await import(
+    "../../../../../app/api/iam/scim/v2/Users/[id]/route"
+  )
+  const req = (suffix = "", raw = scim.rawKey) =>
+    new Request(`https://iam.example/api/iam/scim/v2/Users${suffix}`, {
+      headers: { Authorization: `Bearer ${raw}`, Cookie: "ignored" },
+    })
+  const foreign = await resource.GET(req(), {
+    params: Promise.resolve({ id: foreignScimId }),
+  })
+  expect(foreign.status).toBe(404)
+  expect(await foreign.json()).toMatchObject({
+    status: "404",
+    schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"],
+  })
+  expect((await collection.GET(req("", api.rawKey))).status).toBe(401)
+  const listed = await collection.GET(req("?count=1&startIndex=1"))
+  expect(await listed.json()).toMatchObject({
+    itemsPerPage: 1,
+    totalResults: 1,
+    Resources: [{ id: ownScimId }],
+  })
+  expect(listed.headers.get("Content-Type")).toBe("application/scim+json")
+  const invalid = await collection.GET(req("?count=1001"))
+  expect(invalid.status).toBe(400)
+  expect(await invalid.json()).toMatchObject({ scimType: "invalidValue" })
+  const filter = await collection.GET(req("?filter=unsupported"))
+  expect(await filter.json()).toMatchObject({
+    status: "400",
+    scimType: "invalidFilter",
+  })
+  await keys.revokeApiKey(actor, scim.id)
+  expect((await collection.GET(req())).status).toBe(401)
 })

@@ -350,3 +350,42 @@ export async function deleteRole(actor: Actor, roleId: string): Promise<void> {
     { permission: { resource: "roles", action: "delete" } }
   )
 }
+
+export type PermissionDto = {
+  id: string
+  key: string
+  resource: string
+  action: string
+  appId: string | null
+}
+export async function listPermissions(
+  actor: Actor,
+  page: PaginationInput
+): Promise<Page<PermissionDto>> {
+  const { limit, cursor } = parse(paginationSchema, page)
+  return withIamTransaction(
+    actor,
+    async (tx) => {
+      const rows = await tx.permission.findMany({
+        where: {
+          appId: null,
+          key: { in: [...CORE_PERMISSION_KEYS] },
+          ...(cursor ? { id: { gt: cursor } } : {}),
+        },
+        orderBy: { id: "asc" },
+        take: limit + 1,
+        select: {
+          id: true,
+          key: true,
+          resource: true,
+          action: true,
+          appId: true,
+        },
+      })
+      const more = rows.length > limit
+      if (more) rows.pop()
+      return { items: rows, nextCursor: more ? rows[rows.length - 1].id : null }
+    },
+    { permission: { resource: "permissions", action: "read" } }
+  )
+}

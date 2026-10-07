@@ -12,6 +12,7 @@
     "auth.ts",
     "auth.config.ts",
     "middleware.ts",
+    "app/api/iam/**/*.ts",
     "src/lib/**/*.ts",
     "vitest.config.ts",
     "prisma/seed/**/*.ts"

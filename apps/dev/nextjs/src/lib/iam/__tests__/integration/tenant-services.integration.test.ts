@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto"
 import { PrismaClient } from "@prisma/client"
-import { beforeAll, afterAll, beforeEach, expect, it } from "vitest"
+import { beforeAll, afterAll, beforeEach, expect, it, vi } from "vitest"
 import type { Actor } from "../../types"
+const cookie = vi.hoisted(() => ({ resolve: vi.fn() }))
+vi.mock("../../auth-session", () => ({ resolveAuthIdentity: cookie.resolve }))
 const url = process.env.IAM_TEST_DATABASE_URL
 if (!url || new URL(url).pathname !== "/iam_test")
   throw new Error("Dedicated iam_test required")
@@ -33,6 +35,7 @@ const actor: Actor = {
   meta: { requestId: tag },
 }
 const grants = [
+  "permissions:read",
   "roles:read",
   "roles:create",
   "roles:update",
@@ -343,4 +346,51 @@ it("role update/delete enforce tenant scope and transactional revision/audit", a
       },
     })
   ).toBe(2)
+})
+
+it("HTTP handlers reject foreign tenant IDs, self escalation and strict input while catalog stays public", async () => {
+  cookie.resolve.mockResolvedValue({ userId, sessionId })
+  process.env.IAM_ORIGIN = "https://iam.example"
+  const route = await import("../../../../../app/api/iam/users/[id]/route")
+  const assignment = await import(
+    "../../../../../app/api/iam/users/[id]/roles/route"
+  )
+  const permissions = await import(
+    "../../../../../app/api/iam/permissions/route"
+  )
+  const req = (method = "GET", body?: unknown) =>
+    new Request("https://iam.example/api/iam/users", {
+      method,
+      headers: {
+        "X-IAM-Organization": orgId,
+        Origin: "https://iam.example",
+        "Content-Type": "application/json",
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+  expect(
+    (await route.GET(req(), { params: Promise.resolve({ id: foreignId }) }))
+      .status
+  ).toBe(404)
+  expect(
+    (
+      await route.PATCH(req("PATCH", { name: "forged", systemAdmin: true }), {
+        params: Promise.resolve({ id: userId }),
+      })
+    ).status
+  ).toBe(400)
+  const fresh = await roles.createRole(actor, { name: "unassigned-http" })
+  expect(
+    (
+      await assignment.PUT(req("PUT", { roleIds: [roleId, fresh.id] }), {
+        params: Promise.resolve({ id: userId }),
+      })
+    ).status
+  ).toBe(403)
+  const response = await permissions.GET(req())
+  expect(response.status).toBe(200)
+  const body = await response.text()
+  expect(body).toContain("permissions:read")
+  expect(body).not.toMatch(/passwordHash|secretHash|systemAdmin/)
+  expect(response.headers.get("Cache-Control")).toBe("no-store")
 })

@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto"
 import { PrismaClient } from "@prisma/client"
 import { authenticator } from "otplib"
-import { beforeAll, afterAll, beforeEach, expect, it } from "vitest"
+import { beforeAll, afterAll, beforeEach, expect, it, vi } from "vitest"
 import type { Actor } from "../../types"
+const cookie = vi.hoisted(() => ({ resolve: vi.fn() }))
+vi.mock("../../auth-session", () => ({ resolveAuthIdentity: cookie.resolve }))
 const url = process.env.IAM_TEST_DATABASE_URL
 if (!url || new URL(url).pathname !== "/iam_test")
   throw new Error("Dedicated iam_test required")
@@ -311,4 +313,31 @@ it("pending enrollment is issued once and only expiry allows replacing its secre
     (await db.mfaCredential.findUniqueOrThrow({ where: { userId } }))
       .pendingEncryptedSecret
   ).toBeNull()
+})
+
+it("HTTP backup code concurrency consumes once with no-store responses", async () => {
+  cookie.resolve.mockResolvedValue({ userId, sessionId })
+  process.env.IAM_ORIGIN = "https://iam.example"
+  const { totp } = await enroll()
+  await m.verifyMfa(actor, { totp })
+  const codes = await m.regenerateBackupCodes(actor)
+  const route = await import("../../../../../app/api/iam/mfa/verify/route")
+  const req = () =>
+    new Request("https://iam.example/api/iam/mfa/verify", {
+      method: "POST",
+      headers: {
+        Origin: "https://iam.example",
+        "X-IAM-Organization": orgId,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ backupCode: codes[0] }),
+    })
+  const results = await Promise.all([route.POST(req()), route.POST(req())])
+  expect(results.map((r) => r.status).sort()).toEqual([200, 401])
+  expect(
+    results.every((r) => r.headers.get("Cache-Control") === "no-store")
+  ).toBe(true)
+  expect(
+    await db.backupCode.count({ where: { userId, consumedAt: { not: null } } })
+  ).toBe(1)
 })

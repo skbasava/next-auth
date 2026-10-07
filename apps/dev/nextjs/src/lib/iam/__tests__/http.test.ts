@@ -92,3 +92,54 @@ it("SCIM requires bearer purpose, ignores cookies and returns standard errors", 
     ).status
   ).toBe(200)
 })
+it("unexpected failures are sanitized 500 responses", async () => {
+  const response = await http.withIam(
+    request("GET", { "X-IAM-Organization": "o" }),
+    {},
+    async () => {
+      throw new Error("private failure")
+    }
+  )
+  expect(response.status).toBe(500)
+  expect(await response.json()).toEqual({ error: "internal_error" })
+})
+it("rejects oversized body and duplicate/unbounded pagination", async () => {
+  await expect(
+    http.readJson(
+      request(
+        "POST",
+        { "Content-Type": "application/json" },
+        JSON.stringify({ name: "x".repeat(65537) })
+      ),
+      z.object({ name: z.string() }).strict()
+    )
+  ).rejects.toMatchObject({ status: 400 })
+  const { paginationSchema } = await import("../validation")
+  for (const suffix of [
+    "?limit=101",
+    "?limit=1&limit=2",
+    "?limit=1&orgId=foreign",
+    "?__proto__=foreign",
+  ]) {
+    expect(() =>
+      http.query(
+        new Request(`https://iam.example/api/iam/users${suffix}`),
+        paginationSchema
+      )
+    ).toThrow(IamError)
+  }
+})
+it("SCIM creation can return standard 201 and unexpected failures are 500", async () => {
+  deps.key.mockResolvedValue({ purpose: "scim", keyId: "k", orgId: "o" })
+  const req = request("POST", { Authorization: "Bearer key" })
+  expect(
+    (await http.withScim(req, async () => ({ id: "created" }), 201)).status
+  ).toBe(201)
+  expect(
+    (
+      await http.withScim(req, async () => {
+        throw new Error("secret")
+      })
+    ).status
+  ).toBe(500)
+})

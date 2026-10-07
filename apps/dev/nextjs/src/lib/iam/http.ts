@@ -54,9 +54,27 @@ export async function readJson<S extends z.ZodTypeAny>(
     throw new IamError(400, "invalid_input")
   let value: unknown
   try {
-    const text = await request.text()
-    if (Buffer.byteLength(text) > 65536) throw new Error()
-    value = JSON.parse(text)
+    const reader = request.body?.getReader()
+    if (!reader) throw new Error()
+    const chunks: Uint8Array[] = []
+    let size = 0
+    try {
+      while (true) {
+        const chunk = await reader.read()
+        if (chunk.done) break
+        size += chunk.value.byteLength
+        if (size > 65536) {
+          await reader.cancel()
+          throw new Error()
+        }
+        chunks.push(chunk.value)
+      }
+    } finally {
+      reader.releaseLock()
+    }
+    value = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks))
+    )
   } catch {
     throw new IamError(400, "invalid_input")
   }
@@ -69,9 +87,10 @@ export function query<S extends z.ZodTypeAny>(
   schema: S
 ): z.output<S> {
   const params = new URL(request.url).searchParams
-  const value: Record<string, string> = {}
+  const value: Record<string, string> = Object.create(null)
   for (const [key, item] of params) {
-    if (Object.hasOwn(value, key)) throw new IamError(400, "invalid_input")
+    if (key === "__proto__" || Object.hasOwn(value, key))
+      throw new IamError(400, "invalid_input")
     value[key] = item
   }
   const result = schema.safeParse(value)
@@ -91,27 +110,40 @@ export async function withIam(
 export async function withIam(
   request: Request,
   policy: HttpPolicy,
-  handler: Function
+  handler:
+    | ((actor: Actor) => Promise<unknown>)
+    | ((identity: SessionIdentity, meta: RequestMeta) => Promise<unknown>)
 ): Promise<Response> {
   try {
     const identity = await resolveAuthIdentity()
     requireOrigin(request)
     const meta = requestMeta()
-    if (policy.identityOnly) return json(await handler(identity, meta))
+    if (policy.identityOnly)
+      return json(
+        await (
+          handler as (
+            identity: SessionIdentity,
+            meta: RequestMeta
+          ) => Promise<unknown>
+        )(identity, meta)
+      )
     const orgId = request.headers.get("X-IAM-Organization")
     if (!opaqueIdSchema.safeParse(orgId).success)
       throw new IamError(403, "forbidden")
     const context = await loadIamContext(identity, orgId!)
-    return json(await handler({ context, meta }))
+    return json(
+      await (handler as (actor: Actor) => Promise<unknown>)({ context, meta })
+    )
   } catch (error) {
     return error instanceof IamError
       ? json({ error: error.code }, error.status)
-      : json({ error: "service_unavailable" }, 503)
+      : json({ error: "internal_error" }, 500)
   }
 }
 export async function withScim(
   request: Request,
-  handler: (key: KeyIdentity, meta: RequestMeta) => Promise<unknown>
+  handler: (key: KeyIdentity, meta: RequestMeta) => Promise<unknown>,
+  successStatus = 200
 ): Promise<Response> {
   try {
     const bearer = /^Bearer ([^\s]+)$/i.exec(
@@ -120,7 +152,7 @@ export async function withScim(
     if (!bearer) throw new ScimError(401)
     const key = await authenticateApiKey(bearer[1], "scim")
     const result = await handler(key, requestMeta())
-    return json(result, result === undefined ? 204 : 200, true)
+    return json(result, result === undefined ? 204 : successStatus, true)
   } catch (error) {
     const failure =
       error instanceof ScimError
@@ -130,7 +162,7 @@ export async function withScim(
               error.status,
               error.status === 400 ? "invalidValue" : undefined
             )
-          : new ScimError(503)
+          : new ScimError(500)
     return json(failure.toJSON(), failure.status, true)
   }
 }

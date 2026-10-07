@@ -118,3 +118,41 @@ fixtures, exercise composite foreign keys and concurrent connections. A fresh
 The environment script fails when the credential file or either credential is
 missing. It never generates or rotates credentials: restore the original file
 for existing persistent volumes, rather than generating mismatched credentials.
+
+## Core HTTP APIs
+
+Task 12 handlers run in Node under `app/api/iam/`. Every cookie-authenticated
+request resolves Auth.js identity through `resolveAuthIdentity()` and checks the
+persisted IAM session. Tenant routes require the explicit `X-IAM-Organization`
+header and active membership; there is no default organization. Owning services
+reload current authority in their transactions. Middleware only supplies a coarse
+login check.
+
+Set `IAM_ORIGIN` to the exact deployment origin (for example,
+`https://iam.example.com`, without a trailing slash, path, query or credentials).
+It is validated lazily for mutations. Cookie mutations require an exactly matching
+`Origin` header; missing/invalid configuration returns 503, while a missing or
+inexact request Origin returns 403. Host and forwarding headers never configure
+this check. `INVITATION_ORIGIN` remains the mail link setting and does not supply
+HTTP authorization. Invitation acceptance authenticates live verified email
+without an organization selector or preexisting membership/MFA.
+
+All responses, including errors and one-time keys/enrollment/backup material, use
+`Cache-Control: no-store`. JSON bodies require `application/json` (SCIM also accepts
+`application/scim+json`), are read with a 64 KiB streaming limit, and use strict
+schemas. Empty enrollment, regeneration and invitation acceptance requests send
+`{}`. Core lists accept only `limit` (1–100, default 25) and optional `cursor`;
+repeated or unknown query parameters fail. Permissions lists expose the registered
+core catalog. Session collection GET lists the caller's sessions; DELETE requires
+`{"userId":"target"}` and revokes all sessions for that authorized target.
+API key creation uses an ISO 8601 `expiresAt` string; returned raw keys appear once.
+Unexpected transport failures return sanitized 500 errors; expected service errors
+retain their public status/code.
+
+SCIM Users routes authenticate only purpose-scoped persisted bearer keys and never
+Auth.js cookies. They derive tenant scope from the key, return standard SCIM errors
+and ListResponse, and accept bounded `startIndex`, `count`, and supported `filter`.
+SCIM creation returns 201; deletion returns 204. No application audit metadata
+copies URL paths, invitation tokens, headers or request bodies. Deployment access
+logging must redact invitation-token path segments independently of application
+logging.
