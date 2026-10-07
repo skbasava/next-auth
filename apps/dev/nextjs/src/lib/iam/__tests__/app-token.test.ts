@@ -103,3 +103,17 @@ describe("offline app JWT verification", () => {
     })
   })
 })
+
+it("rejects a token signed with an independent wrong HMAC key", async () => {
+  const token = await new SignJWT(claims)
+    .setProtectedHeader({ alg: "HS256" })
+    .sign(new TextEncoder().encode("different-signing-key-at-least-32-bytes"))
+  await expect(verify(token)).rejects.toMatchObject({ status: 401 })
+})
+it("rejects unrecognized critical signing headers", async () => {
+  // Issuance coverage lives in the real PostgreSQL suite; verification rejects unsupported critical signing metadata.
+  const token = await new SignJWT(claims)
+    .setProtectedHeader({ alg: "HS256", crit: ["future"], future: true })
+    .sign(key, { crit: { future: true } })
+  await expect(verify(token)).rejects.toMatchObject({ status: 401 })
+})

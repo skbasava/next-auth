@@ -151,6 +151,10 @@ function parse<S extends z.ZodTypeAny>(
     )
   return v.data
 }
+/** Preserve SCIM-specific path errors at the HTTP parsing boundary. */
+export function parseScimPatch(input: unknown): ScimPatchInput {
+  return parse(scimPatchSchema, input, true)
+}
 export function parseScimFilter(input?: string): {
   userName?: string
   externalId?: string

@@ -1,8 +1,4 @@
-import {
-  withIam,
-  readJson,
-  query,
-} from "../../../../../../../../src/lib/iam/http"
+import { withIam, readJson } from "../../../../../../../../src/lib/iam/http"
 import {
   assignAppRole,
   appRoleAssignmentSchema,

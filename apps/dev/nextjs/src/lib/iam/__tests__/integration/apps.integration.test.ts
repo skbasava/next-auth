@@ -344,6 +344,78 @@ describe.sequential("application service PostgreSQL", () => {
     expect(audits.length).toBeGreaterThanOrEqual(2)
     expect(JSON.stringify(audits)).not.toContain("integrationSecret")
   })
+  it("direct organization and application MFA policies use persisted session assurance", async () => {
+    await syncAppRolePermissions(actor, slug, roleId, [`${slug}:invoice:read`])
+    for (const policy of ["organization", "application"] as const) {
+      if (policy === "organization")
+        await db.organization.update({
+          where: { id: actor.context.orgId },
+          data: { requireMfa: true },
+        })
+      else
+        await db.orgAppAccess.update({
+          where: { orgId_appId: { orgId: actor.context.orgId, appId } },
+          data: { requireMfa: true },
+        })
+      try {
+        await expect(getApp(tenant, slug)).rejects.toMatchObject({
+          status: 403,
+        })
+        await expect(
+          assignAppRole(tenant, slug, target, [roleId])
+        ).rejects.toMatchObject({ status: 403 })
+        await db.iamSession.update({
+          where: { id: tenant.context.sessionId },
+          data: { mfaVerifiedAt: new Date() },
+        })
+        expect((await getApp(tenant, slug)).slug).toBe(slug)
+        await assignAppRole(tenant, slug, target, [roleId])
+      } finally {
+        await db.iamSession.update({
+          where: { id: tenant.context.sessionId },
+          data: { mfaVerifiedAt: null },
+        })
+        if (policy === "organization")
+          await db.organization.update({
+            where: { id: actor.context.orgId },
+            data: { requireMfa: false },
+          })
+        else
+          await db.orgAppAccess.update({
+            where: { orgId_appId: { orgId: actor.context.orgId, appId } },
+            data: { requireMfa: false },
+          })
+      }
+    }
+  })
+  it("overlapping shared permission synchronization and assignment advance both tenant revisions", async () => {
+    const orgIds = [actor.context.orgId, org2]
+    const before = await db.organization.findMany({
+      where: { id: { in: orgIds } },
+      orderBy: { id: "asc" },
+    })
+    await Promise.all([
+      syncAppRolePermissions(actor, slug, roleId, [`${slug}:invoice:read`]),
+      assignAppRole(actor, slug, target, [roleId]),
+    ])
+    const after = await db.organization.findMany({
+      where: { id: { in: orgIds } },
+      orderBy: { id: "asc" },
+    })
+    for (let i = 0; i < before.length; i++)
+      expect(
+        after[i].authorizationRevision - before[i].authorizationRevision
+      ).toBe(before[i].id === org2 ? 1 : 2)
+    expect(
+      (await getApp(actor, slug)).roles.find((r) => r.id === roleId)
+        ?.permissions
+    ).toEqual([`${slug}:invoice:read`])
+    expect(
+      await db.userAppRole.count({
+        where: { orgId: actor.context.orgId, appId, userId: target, roleId },
+      })
+    ).toBe(1)
+  })
   it("rolls back writes and revisions when audit cannot be persisted", async () => {
     const before = await db.organization.findUniqueOrThrow({
       where: { id: actor.context.orgId },

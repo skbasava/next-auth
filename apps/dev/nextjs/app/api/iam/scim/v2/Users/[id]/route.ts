@@ -1,11 +1,12 @@
+import { z } from "zod"
 import { withScim, readJson } from "../../../../../../../src/lib/iam/http"
 import {
   getScimUser,
   replaceScimUser,
   patchScimUser,
+  parseScimPatch,
   deleteScimUser,
   scimUserSchema,
-  scimPatchSchema,
 } from "../../../../../../../src/lib/iam/scim"
 export const runtime = "nodejs"
 export async function GET(
@@ -30,7 +31,12 @@ export async function PATCH(
 ) {
   const { id } = await route.params
   return withScim(request, async (key, meta) =>
-    patchScimUser(key, id, await readJson(request, scimPatchSchema), meta)
+    patchScimUser(
+      key,
+      id,
+      parseScimPatch(await readJson(request, z.unknown())),
+      meta
+    )
   )
 }
 export async function DELETE(

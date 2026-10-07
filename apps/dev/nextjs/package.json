@@ -9,7 +9,8 @@
     "build": "next build",
     "start": "next start",
     "test:iam": "vitest run --config vitest.config.ts --exclude \"**/*.integration.test.ts\"",
-    "test:iam:integration": "vitest run --config vitest.config.ts src/lib/iam/__tests__/integration",
+    "test:iam:integration": "vitest run --config vitest.integration.config.ts",
+    "test:iam:http": "node scripts/iam-http-e2e.mjs",
     "typecheck:iam": "tsc --project tsconfig.iam.json",
     "prisma:generate": "prisma generate",
     "prisma:seed": "tsx prisma/seed/iam.ts"

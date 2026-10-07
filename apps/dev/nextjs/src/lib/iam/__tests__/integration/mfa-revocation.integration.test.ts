@@ -69,6 +69,20 @@ afterAll(async () => {
   await db.user.deleteMany({ where: { id: { in: [userId, foreignUserId] } } })
   await db.$disconnect()
 })
+const invalidTotp = (secret: string) => {
+  const accepted = new Set(
+    [-1, 0, 1].map((offset) => {
+      const generator = authenticator.clone()
+      generator.options = { epoch: Date.now() + offset * 30000 }
+      return generator.generate(secret)
+    })
+  )
+  for (let i = 0; i < 100; i++) {
+    const code = String(i).padStart(6, "0")
+    if (!accepted.has(code)) return code
+  }
+  throw new Error("No negative TOTP candidate")
+}
 const enroll = async () => {
   const dto = await m.enrollMfa(actor)
   const secret = new URL(dto.otpauth).searchParams.get("secret")!
@@ -104,11 +118,12 @@ it("concurrent TOTP confirmation accepts once and assurance belongs only to the 
   await expect(m.enrollMfa(actor)).rejects.toMatchObject({ status: 409 })
 })
 it("five failed attempts commit a lock and expired pending secrets cannot confirm", async () => {
-  const { totp } = await enroll()
+  const { totp, secret } = await enroll()
+  const bad = invalidTotp(secret)
   for (let i = 0; i < 5; i++)
-    await expect(
-      m.verifyMfa(actor, { totp: "000000" === totp ? "111111" : "000000" })
-    ).rejects.toMatchObject({ status: 401 })
+    await expect(m.verifyMfa(actor, { totp: bad })).rejects.toMatchObject({
+      status: 401,
+    })
   await expect(m.verifyMfa(actor, { totp })).rejects.toMatchObject({
     status: 429,
   })
@@ -235,8 +250,8 @@ it("tampered encryption fails closed and bad public verification input is reject
     })
 })
 it("concurrent verification failures persist a bounded lock without changing assurance", async () => {
-  const { totp } = await enroll()
-  const invalid = totp === "000000" ? "111111" : "000000"
+  const { secret } = await enroll()
+  const invalid = invalidTotp(secret)
   const results = await Promise.allSettled(
     Array.from({ length: 7 }, () => m.verifyMfa(actor, { totp: invalid }))
   )
@@ -340,4 +355,61 @@ it("HTTP backup code concurrency consumes once with no-store responses", async (
   expect(
     await db.backupCode.count({ where: { userId, consumedAt: { not: null } } })
   ).toBe(1)
+})
+
+it("persisted authorized actor cannot revoke foreign or inactive tenant targets", async () => {
+  const grantRole = await db.role.create({
+    data: { orgId, name: `revoke-${tag}` },
+  })
+  const grant = await db.permission.upsert({
+    where: { key: "sessions:revoke" },
+    create: { key: "sessions:revoke", resource: "sessions", action: "revoke" },
+    update: {},
+  })
+  await db.rolePermission.create({
+    data: { orgId, roleId: grantRole.id, permissionId: grant.id },
+  })
+  await db.userRole.create({ data: { orgId, userId, roleId: grantRole.id } })
+  await db.iamSession.update({
+    where: { id: sessionId },
+    data: { mfaVerifiedAt: new Date() },
+  })
+  const foreignSession = randomUUID()
+  await db.iamSession.create({
+    data: {
+      id: foreignSession,
+      userId: foreignUserId,
+      sessionVersion: 0,
+      expiresAt: new Date(Date.now() + 600000),
+    },
+  })
+  try {
+    for (const inactive of [false, true]) {
+      if (inactive)
+        await db.membership.create({
+          data: { orgId, userId: foreignUserId, active: false },
+        })
+      await expect(
+        r.revokeSession(actor, foreignSession)
+      ).rejects.toMatchObject({ status: 404 })
+      await expect(
+        r.revokeAllSessions(actor, foreignUserId)
+      ).rejects.toMatchObject({ status: 404 })
+      expect(
+        (
+          await db.iamSession.findUniqueOrThrow({
+            where: { id: foreignSession },
+          })
+        ).revokedAt
+      ).toBeNull()
+      expect(
+        (await db.user.findUniqueOrThrow({ where: { id: foreignUserId } }))
+          .sessionVersion
+      ).toBe(0)
+    }
+  } finally {
+    await db.role.delete({ where: { orgId_id: { orgId, id: grantRole.id } } })
+    await db.membership.deleteMany({ where: { orgId, userId: foreignUserId } })
+    await db.iamSession.delete({ where: { id: foreignSession } })
+  }
 })

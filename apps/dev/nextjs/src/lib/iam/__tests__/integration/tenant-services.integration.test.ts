@@ -201,6 +201,26 @@ it("mutating a role assigned to the actor cannot add indirect self privileges", 
     })
   ).rejects.toMatchObject({ status: 403 })
 })
+it("indirect self-role mutation rejects actor-held permission from a separate role", async () => {
+  const extra = await db.role.create({ data: { orgId, name: `extra-${tag}` } })
+  const permission = catalog.find((p) => p.key === "audit:read")!
+  try {
+    await db.rolePermission.create({
+      data: { orgId, roleId: extra.id, permissionId: permission.id },
+    })
+    await db.userRole.create({ data: { orgId, userId, roleId: extra.id } })
+    await expect(
+      roles.syncRolePermissions(actor, roleId, {
+        permissionKeys: [...grants, "audit:read"],
+      })
+    ).rejects.toMatchObject({ status: 403 })
+    expect(
+      (await roles.getRole(actor, roleId)).permissions.includes("audit:read")
+    ).toBe(false)
+  } finally {
+    await db.role.delete({ where: { orgId_id: { orgId, id: extra.id } } })
+  }
+})
 it("tenant user read and creation expose neither credentials nor system privilege", async () => {
   const user = await users.createUser(actor, {
     email: `${tag}-new@example.test`,

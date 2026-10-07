@@ -15,6 +15,7 @@
     "app/api/iam/**/*.ts",
     "src/lib/**/*.ts",
     "vitest.config.ts",
+    "vitest.integration.config.ts",
     "prisma/seed/**/*.ts"
   ],
   "exclude": ["node_modules"]

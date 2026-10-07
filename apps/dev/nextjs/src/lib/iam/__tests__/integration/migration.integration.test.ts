@@ -64,10 +64,17 @@ async function fixture(
     })
   ).rejects.toBe(rollback)
 }
-async function rejected(tx: Prisma.TransactionClient, sql: Prisma.Sql) {
+async function rejected(
+  tx: Prisma.TransactionClient,
+  sql: Prisma.Sql,
+  code = "23503"
+) {
   await tx.$executeRawUnsafe("SAVEPOINT invalid_fixture")
   try {
-    await expect(tx.$executeRaw(sql)).rejects.toThrow()
+    await expect(tx.$executeRaw(sql)).rejects.toMatchObject({
+      code: "P2010",
+      meta: { code },
+    })
   } finally {
     await tx.$executeRawUnsafe("ROLLBACK TO SAVEPOINT invalid_fixture")
   }
@@ -77,21 +84,24 @@ describe("PostgreSQL migration isolation gates", () => {
     fixture(async (tx, id) => {
       await rejected(
         tx,
-        Prisma.sql`INSERT INTO "Permission" (id,key,resource,action) VALUES (${id + "dup"},${id + "dup"},${id},'read')`
+        Prisma.sql`INSERT INTO "Permission" (id,key,resource,action) VALUES (${id + "dup"},${id + "dup"},${id},'read')`,
+        "23505"
       )
     }))
   it("rejects application permissions on core roles and scope-update bypass", () =>
     fixture(async (tx, id) => {
       await rejected(
         tx,
-        Prisma.sql`INSERT INTO "RolePermission" ("orgId","roleId","permissionId") VALUES (${id + "1"},${id + "1"},${id + "app"})`
+        Prisma.sql`INSERT INTO "RolePermission" ("orgId","roleId","permissionId") VALUES (${id + "1"},${id + "1"},${id + "app"})`,
+        "23514"
       )
       await tx.rolePermission.create({
         data: { orgId: id + "1", roleId: id + "1", permissionId: id },
       })
       await rejected(
         tx,
-        Prisma.sql`UPDATE "Permission" SET "appId"=${id + "2"} WHERE id=${id}`
+        Prisma.sql`UPDATE "Permission" SET "appId"=${id + "2"} WHERE id=${id}`,
+        "23514"
       )
     }))
   it("bounds core assignments, invitations and SCIM to tenant membership", () =>

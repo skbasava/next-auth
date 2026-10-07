@@ -1,3 +1,5 @@
+import { hash } from "@node-rs/bcrypt"
+import { randomBytes } from "node:crypto"
 import { randomUUID } from "node:crypto"
 import { PrismaClient } from "@prisma/client"
 import { beforeAll, afterAll, expect, it, vi } from "vitest"
@@ -27,6 +29,7 @@ const createdIds = Array.from({ length: 12 }, () => randomUUID())
 const catalogIds = Array.from({ length: 4 }, () => randomUUID())
 const scopes = ["scim:read", "scim:create", "scim:update", "scim:delete"]
 const key: KeyIdentity = { keyId, orgId, purpose: "scim", permissions: scopes }
+const rawKey = `iam_${randomBytes(8).toString("hex")}.${randomBytes(32).toString("base64url")}`
 const meta = { requestId: tag }
 let svc: typeof import("../../scim")
 beforeAll(async () => {
@@ -63,8 +66,8 @@ beforeAll(async () => {
       id: keyId,
       orgId,
       name: "test",
-      prefix: tag,
-      secretHash: "unused",
+      prefix: rawKey.split(".")[0],
+      secretHash: await hash(rawKey, 4),
       purpose: "SCIM",
       permissionKeys: scopes,
       createdByUserId: creator,
@@ -537,4 +540,29 @@ it("concurrent username case variants yield one identity and SQL enforces tenant
       data: { orgId, userId: shared, userName: row.userName.toUpperCase() },
     })
   ).rejects.toMatchObject({ code: "P2002" })
+})
+
+it("HTTP unsupported PATCH paths retain SCIM invalidPath classification", async () => {
+  const target = (
+    await svc.listScimUsers(key, { filter: 'userName eq "unique"' })
+  ).Resources[0].id
+  const { PATCH } = await import(
+    "../../../../../app/api/iam/scim/v2/Users/[id]/route"
+  )
+  const response = await PATCH(
+    new Request("http://localhost/api/iam/scim/v2/Users/missing", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/scim+json",
+        Authorization: `Bearer ${rawKey}`,
+      },
+      body: JSON.stringify({
+        schemas: [svc.SCIM_PATCH_SCHEMA],
+        Operations: [{ op: "replace", path: "roles", value: [] }],
+      }),
+    }),
+    { params: Promise.resolve({ id: target }) }
+  )
+  expect(response.status).toBe(400)
+  expect((await response.json()).scimType).toBe("invalidPath")
 })

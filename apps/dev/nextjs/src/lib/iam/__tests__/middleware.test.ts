@@ -15,7 +15,7 @@ vi.stubEnv("AUTH_SECRET", secret)
 vi.stubEnv("AUTH_TRUST_HOST", "true")
 vi.stubEnv("AUTH_KEYCLOAK_ISSUER", "http://localhost:39999/unused")
 const load = () => import("../../../../middleware")
-async function request(path: string, maxAge?: number) {
+async function request(path: string, maxAge?: number, method = "GET") {
   const headers = new Headers({
     host: "localhost",
     "x-forwarded-proto": "http",
@@ -34,7 +34,7 @@ async function request(path: string, maxAge?: number) {
   // Auth.js exposes server helper overloads; Next invokes this as middleware.
   const handler = middleware as unknown as NextMiddleware
   return handler(
-    new NextRequest(`http://localhost${path}`, { headers }),
+    new NextRequest(`http://localhost${path}`, { headers, method }),
     {} as never
   )
 }
@@ -162,3 +162,12 @@ it("leaves only the exact bearer verification path reachable without a cookie", 
     expect((await request(path))?.status).toBe(401)
   }
 })
+
+it.each(["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])(
+  "requires a session for unsupported verification method %s",
+  async (method) => {
+    expect((await request("/api/iam/verify", undefined, method))?.status).toBe(
+      401
+    )
+  }
+)
