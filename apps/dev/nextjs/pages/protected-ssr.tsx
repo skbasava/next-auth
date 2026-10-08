@@ -21,18 +21,9 @@ export default function Page({ content, session }) {
 export const getServerSideProps: GetServerSideProps = async (context) => {
   const session = await auth(context)
   if (session) {
-    // Note usually you don't need to fetch from an API route in getServerSideProps
-    // This is done here to demonstrate how you can fetch from a third-party API
-    // with a valid session. Likely you would also not pass cookies but an `Authorization` header
-    const hostname =
-      process.env.NEXTAUTH_URL ??
-      (process.env.VERCEL
-        ? "https://next-auth-example-v5.vercel.app"
-        : "http://localhost:3000")
-    const res = await fetch(`${hostname}/api/examples/protected`, {
-      headers: { cookie: context.req.headers.cookie ?? "" },
-    })
-    return { props: { session, content: await res.json() } }
+    // The session is already validated here; no HTTP request back to this app
+    // is needed to obtain the example's protected content.
+    return { props: { session, content: "This is protected content." } }
   }
 
   return { props: {} }

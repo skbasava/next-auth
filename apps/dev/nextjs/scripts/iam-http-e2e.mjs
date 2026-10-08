@@ -290,6 +290,27 @@ try {
       html.includes(adminSession.iamSessionId),
     "authenticated page renders SessionProvider and its live session"
   )
+  for (const who of [admin, undefined]) {
+    requests++
+    const protectedPage = await fetch(origin + "/protected-ssr", {
+      headers: {
+        Cookie: [...(cookies.get(who) ?? [])]
+          .map(([name, value]) => `${name}=${value}`)
+          .join("; "),
+      },
+    })
+    const content = await protectedPage.text()
+    check(
+      protectedPage.status === 200 &&
+        (who
+          ? content.includes("This is protected content.")
+          : content.includes("Access Denied") &&
+            !content.includes("This is protected content.")),
+      who
+        ? "authenticated SSR page works on the actual server port"
+        : "anonymous SSR page does not expose protected content"
+    )
+  }
   if (process.argv.includes("--browser")) {
     const { chromium } = await import("@playwright/test")
     const browser = await chromium.launch({
