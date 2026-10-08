@@ -155,11 +155,20 @@ configuration and then `pnpm start --hostname 127.0.0.1 --port 3000`.
 
 `pnpm test:iam:http` is the canonical production HTTP gate after build. It owns
 its Next process, random ephemeral keys/passwords and exact fixture cleanup;
-51 checks cover login, mutation, tenant/app isolation, offline issuance/verification,
+Checks cover login, mutation, tenant/app isolation, offline issuance/verification,
 MFA, SCIM and revocation. The obsolete fixed-password `/workspace/auth-smoke.py`
 is not a valid IAM gate. Integration configuration validates the test datasource
 and binds DATABASE_URL before imports, with files sequential and within-test races
-preserved. From root, package regression checks require secrets unset:
+preserved.
+
+Add `--browser` to exercise authenticated React hydration, client session updates,
+the Pages Router Policy page, and return to the App Router homepage. Install a
+Playwright Chromium browser first (`pnpm exec playwright install chromium` from
+the repository root), or set `IAM_BROWSER_EXECUTABLE` to an installed Chromium.
+Use `pnpm test:iam:http --dev --browser` to check development bundling instead of
+the production build. Both modes own their server and use the dedicated test DB.
+
+From root, package regression checks require secrets unset:
 
 ```sh
 (unset AUTH_SECRET NEXTAUTH_SECRET; pnpm --dir packages/core test)

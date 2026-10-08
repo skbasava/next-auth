@@ -1,4 +1,4 @@
-/** Local-only production HTTP gate. Source iam-local-env.sh first; build first.
+/** Local-only HTTP gate. Build first, or use --dev to check development bundling.
  * Creates bcrypt fixture users explicitly for this run, never bootstraps production.
  * Owns its Next process and exact fixture IDs. Never logs credentials or responses.
  */
@@ -20,6 +20,7 @@ import { hash } from "@node-rs/bcrypt"
 import { jwtVerify } from "jose"
 import { authenticator } from "otplib"
 
+const development = process.argv.includes("--dev")
 const url = new URL(process.env.IAM_TEST_DATABASE_URL ?? "")
 if (
   url.protocol !== "postgresql:" ||
@@ -233,7 +234,7 @@ try {
   await save()
   const env = {
     ...process.env,
-    NODE_ENV: "production",
+    NODE_ENV: development ? "development" : "production",
     DATABASE_URL: url.href,
     IAM_ORIGIN: origin,
     AUTH_URL: `${origin}/auth`,
@@ -250,7 +251,7 @@ try {
     process.execPath,
     [
       createRequire(import.meta.url).resolve("next/dist/bin/next"),
-      "start",
+      development ? "dev" : "start",
       "--hostname",
       "127.0.0.1",
       "--port",
@@ -271,9 +272,77 @@ try {
     } catch {}
     await delay(250)
   }
-  check(ready, "owned real production Next.js server ready")
+  check(ready, "owned real Next.js server ready")
   const adminSession = await login(admin),
     memberSession = await login(member)
+  requests++
+  const page = await fetch(origin + "/", {
+    headers: {
+      Cookie: [...cookies.get(admin)]
+        .map(([name, value]) => `${name}=${value}`)
+        .join("; "),
+    },
+  })
+  const html = await page.text()
+  check(
+    page.status === 200 &&
+      html.includes("<h3>Client Component</h3>") &&
+      html.includes(adminSession.iamSessionId),
+    "authenticated page renders SessionProvider and its live session"
+  )
+  if (process.argv.includes("--browser")) {
+    const { chromium } = await import("@playwright/test")
+    const browser = await chromium.launch({
+      executablePath: process.env.IAM_BROWSER_EXECUTABLE || undefined,
+    })
+    try {
+      const context = await browser.newContext()
+      await context.addCookies(
+        [...cookies.get(admin)].map(([name, value]) => ({
+          name,
+          value,
+          url: origin,
+        }))
+      )
+      const client = await context.newPage()
+      const errors = []
+      client.on("pageerror", () => errors.push(true))
+      await client.goto(origin + "/")
+      const updated = client.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/auth/session" &&
+          response.request().method() === "POST"
+      )
+      // Observe rejection even if the click fails and the browser closes.
+      updated.catch(() => {})
+      await client
+        .getByRole("button", { name: "Update Session - New Name", exact: true })
+        .last()
+        .click()
+      const session = await (await updated).json()
+      check(
+        errors.length === 0 &&
+          session.user?.id === admin &&
+          session.user?.name === "Client Fill Murray",
+        "SessionProvider hydrates and client-side session update succeeds"
+      )
+      const policy = await client.goto(origin + "/policy")
+      check(policy?.status() === 200, "Pages Router Policy page renders")
+      await client
+        .getByRole("heading", { name: "Terms of Service", exact: true })
+        .waitFor()
+      await client.goBack()
+      await client
+        .getByRole("heading", { name: "Client Component", exact: true })
+        .waitFor()
+      check(
+        errors.length === 0,
+        "Policy page and return preserve React session rendering"
+      )
+    } finally {
+      await browser.close()
+    }
+  }
   for (const slug of appSlugs) {
     const app = await request("/api/iam/apps", {
       who: admin,
